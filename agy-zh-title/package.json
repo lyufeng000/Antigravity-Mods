@@ -1,0 +1,13 @@
+{
+  "name": "agy-zh-title",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity 中文对话标题补丁（等长 UTF-8 原位替换 language_server.exe 硬编码对话标题生成提示词）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/patch.mjs --wait-exit --relaunch",
+    "restore": "node patcher/restore.mjs --wait-exit --relaunch"
+  }
+}

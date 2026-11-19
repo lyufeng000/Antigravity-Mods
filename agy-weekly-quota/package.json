@@ -1,0 +1,13 @@
+{
+  "name": "agy-weekly-quota",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity 左下角账号周额度插槽补丁（0 主动请求，纯被动同步宿主配额数据，与 agy-zh-cn 无冲突共存）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/launch-detached.mjs patch",
+    "restore": "node patcher/launch-detached.mjs restore"
+  }
+}

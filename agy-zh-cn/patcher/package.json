@@ -1,0 +1,1 @@
+﻿{ "name": "agy-zh-cn-patcher", "private": true, "type": "module", "dependencies": { "@electron/asar": "^3.4.1", "acorn": "^8.14.0", "acorn-walk": "^8.3.4", "jsdom": "^25.0.1" } }

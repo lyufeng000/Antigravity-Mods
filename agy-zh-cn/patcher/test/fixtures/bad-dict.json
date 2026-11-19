@@ -1,0 +1,18 @@
+{
+  "meta": { "appVersion": "2.31.2", "note": "lint-dict 测试用：每条都应触发对应的错误" },
+  "exact": {
+    "Open Settings": "打开 设置 ",
+    "Loading...": "正在加载...",
+    "Sign in with Google": "使用谷歌登录",
+    "Run `/plan` now": "立即运行计划",
+    "Active Skills": "已启用的技能",
+    "List Tools": "列出 Tools",
+    "Open file": "打开文件 。",
+    "Use Gemini": "使用Gemini",
+    "Empty": ""
+  },
+  "patterns": {
+    "{0} files changed": "已更改 {1} 个文件",
+    "Delete {0}": "删除"
+  }
+}

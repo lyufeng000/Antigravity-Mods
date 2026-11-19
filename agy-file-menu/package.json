@@ -1,0 +1,13 @@
+{
+  "name": "agy-file-menu",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity 本地文件右键增强菜单补丁（复制、复制文件路径、资源管理器定位、默认程序打开、默认浏览器打开，与 agy-zh-cn 及 agy-weekly-quota 无冲突共存）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/patch.mjs --wait-exit --relaunch",
+    "restore": "node patcher/restore.mjs --wait-exit --relaunch"
+  }
+}

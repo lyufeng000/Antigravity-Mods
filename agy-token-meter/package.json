@@ -1,0 +1,13 @@
+{
+  "name": "agy-token-meter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity 顶栏面包屑旁实时 Tokens 统计补丁（监听本地 transcript.jsonl 步级精确落盘，展示当前对话、上下文规模、今日与本周消耗，与 agy-zh-cn / agy-weekly-quota / agy-file-menu 无冲突共存）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/patch.mjs --wait-exit --relaunch",
+    "restore": "node patcher/restore.mjs --wait-exit --relaunch"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "agy-zh-cn",
+  "displayName": "Antigravity 简体中文",
+  "description": "Antigravity 全量汉化：界面补丁 + Agent 交互层中文规则与统一术语表。",
+  "version": "0.1.0",
+  "suggestedPrompts": [
+    "应用汉化补丁",
+    "检查汉化补丁状态",
+    "更新后补译新增文字"
+  ]
+}

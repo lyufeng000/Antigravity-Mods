@@ -1,0 +1,13 @@
+{
+  "name": "agy-periodic-model",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity Gemini 4 元素周期表模型选择器补丁（还原 Google AI Studio 周期表视图，禁选未支持元素，并通过二级菜单完整兼顾所有非表内模型与推理档位）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/patch.mjs --wait-exit --relaunch",
+    "restore": "node patcher/restore.mjs --wait-exit --relaunch"
+  }
+}
