@@ -1,11 +1,10 @@
 @echo off
 chcp 65001 >nul
 setlocal
-title Antigravity 五补丁一键恢复 (汉化 + 周额度 + 文件菜单 + Tokens + 周期表)
+title Antigravity 六补丁一键恢复工具
 
 echo ========================================================
-echo   Antigravity 五补丁恢复工具
-echo   agy-zh-cn / agy-weekly-quota / agy-file-menu / agy-token-meter / agy-periodic-model
+echo   Antigravity 六补丁一键恢复工具 (汉化/周额度/菜单/Tokens/周期表/中文标题)
 echo ========================================================
 echo.
 

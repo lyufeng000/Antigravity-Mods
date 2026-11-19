@@ -54,11 +54,17 @@ import {
 import {
   stripPeriodicModelBlock, buildPeriodicModelBlock,
 } from './agy-periodic-model/patcher/patch.mjs';
+import { validatePrompts } from './agy-zh-title/patcher/lib/prompt.mjs';
+import { runningLsCount, waitLsExit } from './agy-zh-title/patcher/lib/common.mjs';
+import {
+  inspectLsTitleState, applyLsTitlePatch, restoreLsTitlePatch,
+} from './agy-zh-title/patcher/patch.mjs';
 
 const asar = loadDep('@electron/asar');
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ZH_DIR = path.join(ROOT_DIR, 'agy-zh-cn');
 const BACKUP_DIR = process.env.AGY_BACKUP_DIR || path.join(ROOT_DIR, '.backup');
+const LS_TITLE_META_FILE = path.join(BACKUP_DIR, 'language_server.title-meta.json');
 const WORK_ROOT = process.env.AGY_REPATCH_TEMP || path.join(TEMP_ROOT, 'agy-repatch');
 const LOG_FILE = path.join(WORK_ROOT, 'repatch.log');
 
@@ -101,14 +107,31 @@ function inspectState() {
     file: b.file,
     matches: b.version === version,
   }));
+
+  let zhTitleStatus = 'missing';
+  let zhTitleOffset = -1;
+  if (fs.existsSync(LS_EXE)) {
+    try {
+      const lsSt = inspectLsTitleState(LS_EXE, LS_TITLE_META_FILE);
+      zhTitleStatus = lsSt.status;
+      zhTitleOffset = lsSt.offset;
+    } catch {
+      zhTitleStatus = 'error';
+    }
+  }
+
   return {
     asar: ASAR,
+    lsExe: LS_EXE,
     version,
     zhPatched,
     quotaPatched,
     fileMenuPatched,
     tokenMeterPatched,
     periodicModelPatched,
+    zhTitleStatus,
+    zhTitlePatched: zhTitleStatus === 'patched',
+    zhTitleOffset,
     anyPatched,
     dictVersion: dict?.meta?.appVersion ?? null,
     backupDir: BACKUP_DIR,
@@ -220,13 +243,32 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
 
     if (!dryRun) {
       replaceFile(outAsar, ASAR);
+      const lsRes = applyLsTitlePatch({
+        lsPath: LS_EXE,
+        metaFile: LS_TITLE_META_FILE,
+        version,
+        dryRun: false,
+      });
       const after = inspectState();
-      if (!after.zhPatched || !after.quotaPatched || !after.fileMenuPatched || !after.tokenMeterPatched || !after.periodicModelPatched) {
-        throw new Error('替换后未同时检测到五补丁标记');
+      if (
+        !after.zhPatched
+        || !after.quotaPatched
+        || !after.fileMenuPatched
+        || !after.tokenMeterPatched
+        || !after.periodicModelPatched
+        || !after.zhTitlePatched
+      ) {
+        throw new Error('替换后未同时检测到六补丁标记');
       }
-      log(`五补丁合并注入完成（Antigravity ${version}，共校验 ${cmp.files} 个文件）`);
+      log(`六补丁合并注入完成（Antigravity ${version}，共校验 ${cmp.files} 个 asar 文件，标题偏移 0x${lsRes.offset.toString(16)}）`);
     } else {
-      log(`合并 dry-run 预检通过（Antigravity ${version}，共校验 ${cmp.files} 个文件）`);
+      applyLsTitlePatch({
+        lsPath: LS_EXE,
+        metaFile: LS_TITLE_META_FILE,
+        version,
+        dryRun: true,
+      });
+      log(`合并 dry-run 预检通过（Antigravity ${version}，共校验 ${cmp.files} 个 asar 文件）`);
     }
   } finally {
     rmWork(work);
@@ -235,20 +277,32 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
 
 async function restoreCleanOriginal() {
   const st = inspectState();
-  const mine = st.backups.find((b) => b.matches);
-  if (!st.anyPatched) {
+  const needAsarRestore = st.anyPatched;
+  const needLsRestore = st.zhTitleStatus === 'patched' || st.zhTitleStatus === 'outdated_patch';
+  if (!needAsarRestore && !needLsRestore) {
     log('当前未注入任何补丁，无需还原');
     return;
   }
-  if (!mine) {
-    throw new Error(`找不到当前版本 (${st.version}) 的纯净备份（备份目录：${BACKUP_DIR}）`);
+  if (needAsarRestore) {
+    const mine = st.backups.find((b) => b.matches);
+    if (!mine) {
+      throw new Error(`找不到当前版本 (${st.version}) 的纯净备份（备份目录：${BACKUP_DIR}）`);
+    }
+    if (ANY_PATCH_RE.test(fs.readFileSync(mine.file).toString('latin1'))) {
+      throw new Error('备份文件自身含补丁块，拒绝还原');
+    }
+    replaceFile(mine.file, ASAR);
+    if (inspectState().anyPatched) throw new Error('还原后仍检测到补丁标记');
+    log(`已从 ${mine.file} 完整还原官方原版 app.asar`);
   }
-  if (ANY_PATCH_RE.test(fs.readFileSync(mine.file).toString('latin1'))) {
-    throw new Error('备份文件自身含补丁块，拒绝还原');
+  if (needLsRestore) {
+    restoreLsTitlePatch({
+      lsPath: LS_EXE,
+      metaFile: LS_TITLE_META_FILE,
+      version: st.version,
+      dryRun: false,
+    });
   }
-  replaceFile(mine.file, ASAR);
-  if (inspectState().anyPatched) throw new Error('还原后仍检测到补丁标记');
-  log(`已从 ${mine.file} 完整还原官方原版 app.asar`);
 }
 
 function runPreflight({ skipLint = false } = {}) {
@@ -268,22 +322,31 @@ function runPreflight({ skipLint = false } = {}) {
     const gloss = fs.existsSync(glossaryPath) ? fs.readFileSync(glossaryPath, 'utf8') : null;
     const lr = lintDict(dict, gloss);
     if (lr.errors > 0) throw new Error(`词典校验发现 ${lr.errors} 个错误，已中止`);
-    console.log(`预检 1/6（汉化词典 Lint）：通过（${lr.entries} 条，错误 0）`);
+    console.log(`预检 1/7（汉化词典 Lint）：通过（${lr.entries} 条，错误 0）`);
   }
   execFileSync(process.execPath, ['--check', SLOT_SCRIPT], { stdio: 'pipe' });
   execFileSync(process.execPath, ['--check', QUOTA_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 2/6（周额度插槽与主进程配置桥语法）：通过');
+  console.log('预检 2/7（周额度插槽与主进程配置桥语法）：通过');
 
   execFileSync(process.execPath, ['--check', FILE_MENU_PRELOAD_SCRIPT], { stdio: 'pipe' });
   execFileSync(process.execPath, ['--check', FILE_MENU_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 3/6（文件右键菜单 preload 与主进程 IPC 语法）：通过');
+  console.log('预检 3/7（文件右键菜单 preload 与主进程 IPC 语法）：通过');
 
   execFileSync(process.execPath, ['--check', TOKEN_METER_PRELOAD_SCRIPT], { stdio: 'pipe' });
   execFileSync(process.execPath, ['--check', TOKEN_METER_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 4/6（实时 Tokens 统计 preload 与主进程 IPC 语法）：通过');
+  console.log('预检 4/7（实时 Tokens 统计 preload 与主进程 IPC 语法）：通过');
 
   execFileSync(process.execPath, ['--check', PERIODIC_MODEL_PRELOAD_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 5/6（周期表模型选择器 preload 语法）：通过');
+  console.log('预检 5/7（周期表模型选择器 preload 语法）：通过');
+
+  const promptSizes = validatePrompts();
+  const lsDry = applyLsTitlePatch({
+    lsPath: LS_EXE,
+    metaFile: LS_TITLE_META_FILE,
+    version: appInfo().version,
+    dryRun: true,
+  });
+  console.log(`预检 6/7（中文对话标题提示词校验）：通过（${promptSizes.patchedBytes} 字节，状态 ${lsDry.status}，偏移 0x${lsDry.offset.toString(16)}）`);
 }
 
 function killStaleWatchers() {
@@ -324,15 +387,27 @@ async function main() {
     if (args.has('--json')) {
       console.log(JSON.stringify(st, null, 2));
     } else {
+      const zhTitleText = st.zhTitlePatched
+        ? `已注入（偏移 0x${st.zhTitleOffset.toString(16)}）`
+        : ({
+          unpatched: '未注入',
+          outdated_patch: '旧版补丁待升级',
+          prompt_changed: '上游提示词已变更',
+          not_found: '未找到目标提示词',
+          ambiguous: '匹配位置不唯一',
+          missing: '未找到 language_server.exe',
+          error: '检查失败',
+        }[st.zhTitleStatus] || st.zhTitleStatus);
       console.log(`客户端版本：${st.version}（词典基准版本：${st.dictVersion || '未知'}）`);
       console.log(`汉化补丁（agy-zh-cn）        ：${st.zhPatched ? '已注入' : '未注入'}`);
       console.log(`周额度补丁（agy-weekly-quota）：${st.quotaPatched ? '已注入' : '未注入'}`);
       console.log(`文件菜单补丁（agy-file-menu） ：${st.fileMenuPatched ? '已注入' : '未注入'}`);
       console.log(`Tokens 补丁（agy-token-meter）：${st.tokenMeterPatched ? '已注入' : '未注入'}`);
       console.log(`周期表补丁（agy-periodic-model）：${st.periodicModelPatched ? '已注入' : '未注入'}`);
+      console.log(`中文标题补丁（agy-zh-title）  ：${zhTitleText}`);
       console.log(`共享纯净备份（${st.backupDir}）：${st.backups.length ? st.backups.map((b) => `${b.version}${b.matches ? '（匹配）' : '（旧版）'}`).join('，') : '无'}`);
       if (st.dictVersion && st.dictVersion !== st.version) {
-        console.log(`提示：客户端已升级至 ${st.version}（词典为 ${st.dictVersion}），重打补丁可立即恢复现有五项补丁；若发现新增英文可后续增量补译。`);
+        console.log(`提示：客户端已升级至 ${st.version}（词典为 ${st.dictVersion}），重打补丁可立即恢复现有六项补丁；若发现新增英文可后续增量补译。`);
       }
     }
     return;
@@ -348,6 +423,7 @@ async function main() {
   if (args.has('--worker')) {
     log(`===== repatch-all worker (${action}) 启动 =====`);
     await waitExit(EXE, 24 * 60 * 60 * 1000);
+    await waitLsExit(LS_EXE, 24 * 60 * 60 * 1000);
     if (action === 'patch') await applyCombinedPatch({ dryRun: false });
     else await restoreCleanOriginal();
     if (doRelaunch) relaunch(EXE);
@@ -358,10 +434,10 @@ async function main() {
   if (action === 'patch') {
     runPreflight({ skipLint: args.has('--no-lint') });
     await applyCombinedPatch({ dryRun: true });
-    console.log('预检 6/6（五补丁合并重打包 dry-run）：通过');
+    console.log('预检 7/7（六补丁合并重打包与标题提示词 dry-run）：通过');
     const st = inspectState();
     if (st.dictVersion && st.dictVersion !== st.version) {
-      console.log(`提示：检测到客户端新版本 ${st.version}（词典版本 ${st.dictVersion}），本次将直接恢复五补丁并建立 ${st.version} 纯净备份。`);
+      console.log(`提示：检测到客户端新版本 ${st.version}（词典版本 ${st.dictVersion}），本次将直接恢复六补丁并建立 ${st.version} 纯净备份。`);
     }
   }
 
@@ -373,7 +449,9 @@ async function main() {
   const killed = killStaleWatchers();
   if (killed) console.log(`已清理 ${killed} 个旧的后台等待进程`);
 
-  const activeProcs = runningCount(EXE);
+  const activeAppProcs = runningCount(EXE);
+  const activeLsProcs = runningLsCount(LS_EXE);
+  const activeProcs = activeAppProcs + activeLsProcs;
   if (activeProcs === 0) {
     // 客户端当前未运行：直接同步完成替换并按需拉起
     log(`检测到 Antigravity 未运行，立即执行 ${action}…`);
@@ -397,8 +475,8 @@ async function main() {
     pid = child.pid;
   }
 
-  console.log(`\n已在后台准备就绪（PID=${pid}），当前检测到 ${activeProcs} 个 Antigravity 进程。`);
-  console.log(`请关闭所有 Antigravity 窗口，后台会在约 3～5 秒内自动完成${action === 'patch' ? '五补丁注入' : '原版还原'}并重新打开应用。`);
+  console.log(`\n已在后台准备就绪（PID=${pid}），当前检测到 ${activeAppProcs} 个 Antigravity 进程、${activeLsProcs} 个 language_server 进程。`);
+  console.log(`请关闭所有 Antigravity 窗口，后台会在约 3～5 秒内自动完成${action === 'patch' ? '六补丁注入' : '原版还原'}并重新打开应用。`);
   console.log(`日志文件：${LOG_FILE}`);
 }
 

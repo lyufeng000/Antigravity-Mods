@@ -49,9 +49,6 @@ export function applyLsTitlePatch({
     previousPatchedPrompt: meta?.patchedPrompt ?? null,
   });
 
-  if (info.overlapsWebZip) {
-    throw new Error(`命中区间 [${info.offset}, ${info.offset + info.byteLength}) 与内嵌前端 ZIP 重叠，拒绝修改`);
-  }
   if (info.status === 'ambiguous') {
     throw new Error(`language_server.exe 中存在多处候选位置 (${info.anchorOffsets.join(', ')})，无法安全原位替换`);
   }
@@ -60,6 +57,9 @@ export function applyLsTitlePatch({
   }
   if (info.status === 'not_found') {
     throw new Error(`未在 ${lsPath} 中找到对话标题生成提示词`);
+  }
+  if (info.overlapsWebZip) {
+    throw new Error(`命中区间 [${info.offset}, ${info.offset + info.byteLength}) 与内嵌前端 ZIP 重叠，拒绝修改`);
   }
 
   if (info.status === 'patched') {

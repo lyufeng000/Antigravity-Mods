@@ -37,7 +37,7 @@ function buildSyntheticZip() {
 function makeSyntheticBinary(payloadStr = ORIG_PROMPT, { repeat = 1 } = {}) {
   const head = Buffer.from('SYNTHETIC_PE_HEADER_AND_CODE_'.repeat(30), 'utf8');
   const mid = Buffer.from('_MIDDLE_PADDING_BYTES_'.repeat(10), 'utf8');
-  const tail = Buffer.from('_RODATA_TAIL_PADDING_'.repeat(25), 'utf8');
+  const tail = Buffer.from('_RODATA_TAIL_PADDING_'.repeat(50), 'utf8');
   const payload = Buffer.from(payloadStr, 'utf8');
   const parts = [head];
   for (let i = 0; i < repeat; i++) {
