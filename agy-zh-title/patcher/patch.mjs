@@ -165,9 +165,10 @@ export function restoreLsTitlePatch({
     };
   }
 
+  const curSha = sha256Buffer(buf);
   const origBuf = Buffer.from(origPrompt, 'utf8');
   const expectedSha = sha256WithReplacement(buf, info.offset, origBuf);
-  if (meta?.origSha256 && (!meta.version || !version || meta.version === version) && meta.origSha256 !== expectedSha) {
+  if (meta?.origSha256 && meta?.patchedSha256 === curSha && (!meta.version || !version || meta.version === version) && meta.origSha256 !== expectedSha) {
     throw new Error(`还原后预期 SHA-256 (${expectedSha}) 与原始记录 (${meta.origSha256}) 不一致，拒绝修改`);
   }
 

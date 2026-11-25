@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
 setlocal
-title Antigravity 六补丁一键恢复工具
+title Antigravity 八补丁一键恢复工具
 
 echo ========================================================
-echo   Antigravity 六补丁一键恢复工具 (汉化/周额度/菜单/Tokens/周期表/中文标题)
+echo   Antigravity 八补丁一键恢复工具 (汉化/周额度/菜单/Tokens/周期表/通知跳转/中文标题/中文步骤)
 echo ========================================================
 echo.
 

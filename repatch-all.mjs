@@ -1,4 +1,4 @@
-// Antigravity 六补丁联合编排器（汉化 agy-zh-cn + 周额度 agy-weekly-quota + 右键菜单 agy-file-menu + 实时 Tokens agy-token-meter + 周期表 agy-periodic-model + 中文对话标题 agy-zh-title）
+// Antigravity 八补丁联合编排器（汉化 agy-zh-cn + 周额度 agy-weekly-quota + 右键菜单 agy-file-menu + 实时 Tokens agy-token-meter + 周期表 agy-periodic-model + 通知跳转 agy-win-notify + 中文对话标题 agy-zh-title + 中文步骤 agy-zh-steps）
 // 用法：
 //   node repatch-all.mjs [patch] [--dry-only] [--no-relaunch] [--no-lint]
 //   node repatch-all.mjs check [--json]
@@ -49,22 +49,37 @@ import {
 } from './agy-token-meter/patcher/patch.mjs';
 import {
   MARK_BEGIN as PERIODIC_MODEL_BEGIN, MARK_END as PERIODIC_MODEL_END,
+  MAIN_MARK_BEGIN as PERIODIC_MODEL_MAIN_BEGIN, MAIN_MARK_END as PERIODIC_MODEL_MAIN_END,
   PRELOAD_SCRIPT as PERIODIC_MODEL_PRELOAD_SCRIPT,
+  MAIN_IPC_SCRIPT as PERIODIC_MODEL_MAIN_IPC_SCRIPT,
+  EQUIV_COST_FILE as PERIODIC_MODEL_EQUIV_COST_FILE,
 } from './agy-periodic-model/patcher/lib/common.mjs';
 import {
-  stripPeriodicModelBlock, buildPeriodicModelBlock,
+  stripPeriodicModelBlock, stripMainPeriodicModelBlock, buildPeriodicModelBlock, buildMainPeriodicModelBlock,
 } from './agy-periodic-model/patcher/patch.mjs';
 import { validatePrompts } from './agy-zh-title/patcher/lib/prompt.mjs';
 import { runningLsCount, waitLsExit } from './agy-zh-title/patcher/lib/common.mjs';
 import {
   inspectLsTitleState, applyLsTitlePatch, restoreLsTitlePatch,
 } from './agy-zh-title/patcher/patch.mjs';
+import { validateTargets } from './agy-zh-steps/patcher/lib/targets.mjs';
+import {
+  inspectLsStepsState, applyLsStepsPatch, restoreLsStepsPatch,
+} from './agy-zh-steps/patcher/patch.mjs';
+import {
+  MAIN_MARK_BEGIN as WIN_NOTIFY_MAIN_BEGIN, MAIN_MARK_END as WIN_NOTIFY_MAIN_END,
+  MAIN_SCRIPT as WIN_NOTIFY_MAIN_SCRIPT,
+} from './agy-win-notify/patcher/lib/common.mjs';
+import {
+  stripMainWinNotifyBlock, buildMainWinNotifyBlock,
+} from './agy-win-notify/patcher/patch.mjs';
 
 const asar = loadDep('@electron/asar');
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ZH_DIR = path.join(ROOT_DIR, 'agy-zh-cn');
 const BACKUP_DIR = process.env.AGY_BACKUP_DIR || path.join(ROOT_DIR, '.backup');
 const LS_TITLE_META_FILE = path.join(BACKUP_DIR, 'language_server.title-meta.json');
+const LS_STEPS_META_FILE = path.join(BACKUP_DIR, 'language_server.steps-meta.json');
 const WORK_ROOT = process.env.AGY_REPATCH_TEMP || path.join(TEMP_ROOT, 'agy-repatch');
 const LOG_FILE = path.join(WORK_ROOT, 'repatch.log');
 
@@ -98,7 +113,8 @@ function inspectState() {
   const quotaPatched = raw.includes(QUOTA_BEGIN) && raw.includes(QUOTA_MAIN_BEGIN);
   const fileMenuPatched = raw.includes(FILE_MENU_BEGIN) && raw.includes(FILE_MENU_MAIN_BEGIN);
   const tokenMeterPatched = raw.includes(TOKEN_METER_BEGIN) && raw.includes(TOKEN_METER_MAIN_BEGIN);
-  const periodicModelPatched = raw.includes(PERIODIC_MODEL_BEGIN);
+  const periodicModelPatched = raw.includes(PERIODIC_MODEL_BEGIN) && raw.includes(PERIODIC_MODEL_MAIN_BEGIN);
+  const winNotifyPatched = raw.includes(WIN_NOTIFY_MAIN_BEGIN);
   const anyPatched = ANY_PATCH_RE.test(raw);
   const dictPath = defaultDictPath(ZH_DIR);
   const dict = fs.existsSync(dictPath) ? JSON.parse(fs.readFileSync(dictPath, 'utf8')) : null;
@@ -110,6 +126,9 @@ function inspectState() {
 
   let zhTitleStatus = 'missing';
   let zhTitleOffset = -1;
+  let zhStepsStatus = 'missing';
+  let zhStepsPatchedCount = 0;
+  let zhStepsTotalCount = 0;
   if (fs.existsSync(LS_EXE)) {
     try {
       const lsSt = inspectLsTitleState(LS_EXE, LS_TITLE_META_FILE);
@@ -117,6 +136,14 @@ function inspectState() {
       zhTitleOffset = lsSt.offset;
     } catch {
       zhTitleStatus = 'error';
+    }
+    try {
+      const stepsSt = inspectLsStepsState(LS_EXE, LS_STEPS_META_FILE);
+      zhStepsStatus = stepsSt.status;
+      zhStepsPatchedCount = stepsSt.patchedCount;
+      zhStepsTotalCount = stepsSt.totalCount;
+    } catch {
+      zhStepsStatus = 'error';
     }
   }
 
@@ -129,9 +156,14 @@ function inspectState() {
     fileMenuPatched,
     tokenMeterPatched,
     periodicModelPatched,
+    winNotifyPatched,
     zhTitleStatus,
     zhTitlePatched: zhTitleStatus === 'patched',
     zhTitleOffset,
+    zhStepsStatus,
+    zhStepsPatched: zhStepsStatus === 'patched',
+    zhStepsPatchedCount,
+    zhStepsTotalCount,
     anyPatched,
     dictVersion: dict?.meta?.appVersion ?? null,
     backupDir: BACKUP_DIR,
@@ -199,11 +231,13 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
     fs.writeFileSync(preloadFile, merged);
     execFileSync(process.execPath, ['--check', preloadFile], { stdio: 'pipe' });
 
-    const cleanMain = stripMainTokenMeterBlock(stripMainFileMenuBlock(stripMainQuotaBlock(fs.readFileSync(mainFile, 'utf8'))));
+    const cleanMain = stripMainWinNotifyBlock(stripMainPeriodicModelBlock(stripMainTokenMeterBlock(stripMainFileMenuBlock(stripMainQuotaBlock(fs.readFileSync(mainFile, 'utf8'))))));
     if (
       cleanMain.includes(QUOTA_MAIN_BEGIN) || cleanMain.includes(QUOTA_MAIN_END)
       || cleanMain.includes(FILE_MENU_MAIN_BEGIN) || cleanMain.includes(FILE_MENU_MAIN_END)
       || cleanMain.includes(TOKEN_METER_MAIN_BEGIN) || cleanMain.includes(TOKEN_METER_MAIN_END)
+      || cleanMain.includes(PERIODIC_MODEL_MAIN_BEGIN) || cleanMain.includes(PERIODIC_MODEL_MAIN_END)
+      || cleanMain.includes(WIN_NOTIFY_MAIN_BEGIN) || cleanMain.includes(WIN_NOTIFY_MAIN_END)
       || ANY_PATCH_RE.test(cleanMain)
     ) {
       throw new Error('main.js 中的旧补丁块不完整或存在残留标记，无法安全剥离');
@@ -211,7 +245,9 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
     const mergedMain = cleanMain.replace(/\s*$/, '\n')
       + buildMainQuotaBlock(QUOTA_MAIN_IPC_SCRIPT, ACCOUNTS_CONFIG_FILE)
       + buildMainFileMenuBlock(FILE_MENU_MAIN_IPC_SCRIPT)
-      + buildMainTokenMeterBlock(TOKEN_METER_MAIN_IPC_SCRIPT);
+      + buildMainTokenMeterBlock(TOKEN_METER_MAIN_IPC_SCRIPT)
+      + buildMainPeriodicModelBlock(PERIODIC_MODEL_MAIN_IPC_SCRIPT, PERIODIC_MODEL_EQUIV_COST_FILE)
+      + buildMainWinNotifyBlock(WIN_NOTIFY_MAIN_SCRIPT);
     fs.writeFileSync(mainFile, mergedMain);
     execFileSync(process.execPath, ['--check', mainFile], { stdio: 'pipe' });
 
@@ -234,6 +270,8 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
     if (newMain.split(QUOTA_MAIN_BEGIN).length - 1 !== 1) throw new Error('周额度 main 注入块数量异常');
     if (newMain.split(FILE_MENU_MAIN_BEGIN).length - 1 !== 1) throw new Error('文件右键菜单 main 注入块数量异常');
     if (newMain.split(TOKEN_METER_MAIN_BEGIN).length - 1 !== 1) throw new Error('实时 Tokens main 注入块数量异常');
+    if (newMain.split(PERIODIC_MODEL_MAIN_BEGIN).length - 1 !== 1) throw new Error('周期表模型选择器 main 注入块数量异常');
+    if (newMain.split(WIN_NOTIFY_MAIN_BEGIN).length - 1 !== 1) throw new Error('通知跳转 main 注入块数量异常');
 
     asar.extractAll(outAsar, verifyDir);
     execFileSync(process.execPath, ['--check', path.join(verifyDir, ...PRELOAD.split('/'))], { stdio: 'pipe' });
@@ -249,6 +287,12 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
         version,
         dryRun: false,
       });
+      const stepsRes = applyLsStepsPatch({
+        lsPath: LS_EXE,
+        metaFile: LS_STEPS_META_FILE,
+        version,
+        dryRun: false,
+      });
       const after = inspectState();
       if (
         !after.zhPatched
@@ -256,15 +300,23 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
         || !after.fileMenuPatched
         || !after.tokenMeterPatched
         || !after.periodicModelPatched
+        || !after.winNotifyPatched
         || !after.zhTitlePatched
+        || !after.zhStepsPatched
       ) {
-        throw new Error('替换后未同时检测到六补丁标记');
+        throw new Error('替换后未同时检测到八补丁标记');
       }
-      log(`六补丁合并注入完成（Antigravity ${version}，共校验 ${cmp.files} 个 asar 文件，标题偏移 0x${lsRes.offset.toString(16)}）`);
+      log(`八补丁合并注入完成（Antigravity ${version}，共校验 ${cmp.files} 个 asar 文件，标题偏移 0x${lsRes.offset.toString(16)}，步骤 ${stepsRes.patchedCount}/${stepsRes.totalCount}）`);
     } else {
       applyLsTitlePatch({
         lsPath: LS_EXE,
         metaFile: LS_TITLE_META_FILE,
+        version,
+        dryRun: true,
+      });
+      applyLsStepsPatch({
+        lsPath: LS_EXE,
+        metaFile: LS_STEPS_META_FILE,
         version,
         dryRun: true,
       });
@@ -278,8 +330,9 @@ export async function applyCombinedPatch({ dryRun = false } = {}) {
 async function restoreCleanOriginal() {
   const st = inspectState();
   const needAsarRestore = st.anyPatched;
-  const needLsRestore = st.zhTitleStatus === 'patched' || st.zhTitleStatus === 'outdated_patch';
-  if (!needAsarRestore && !needLsRestore) {
+  const needLsTitleRestore = st.zhTitleStatus === 'patched' || st.zhTitleStatus === 'outdated_patch';
+  const needLsStepsRestore = ['patched', 'partial', 'outdated_patch'].includes(st.zhStepsStatus);
+  if (!needAsarRestore && !needLsTitleRestore && !needLsStepsRestore) {
     log('当前未注入任何补丁，无需还原');
     return;
   }
@@ -295,7 +348,15 @@ async function restoreCleanOriginal() {
     if (inspectState().anyPatched) throw new Error('还原后仍检测到补丁标记');
     log(`已从 ${mine.file} 完整还原官方原版 app.asar`);
   }
-  if (needLsRestore) {
+  if (needLsStepsRestore) {
+    restoreLsStepsPatch({
+      lsPath: LS_EXE,
+      metaFile: LS_STEPS_META_FILE,
+      version: st.version,
+      dryRun: false,
+    });
+  }
+  if (needLsTitleRestore) {
     restoreLsTitlePatch({
       lsPath: LS_EXE,
       metaFile: LS_TITLE_META_FILE,
@@ -316,28 +377,31 @@ function runPreflight({ skipLint = false } = {}) {
   if (!fs.existsSync(TOKEN_METER_PRELOAD_SCRIPT)) throw new Error(`找不到实时 Tokens preload 脚本：${TOKEN_METER_PRELOAD_SCRIPT}`);
   if (!fs.existsSync(TOKEN_METER_MAIN_IPC_SCRIPT)) throw new Error(`找不到实时 Tokens 主进程脚本：${TOKEN_METER_MAIN_IPC_SCRIPT}`);
   if (!fs.existsSync(PERIODIC_MODEL_PRELOAD_SCRIPT)) throw new Error(`找不到周期表模型选择器 preload 脚本：${PERIODIC_MODEL_PRELOAD_SCRIPT}`);
+  if (!fs.existsSync(PERIODIC_MODEL_MAIN_IPC_SCRIPT)) throw new Error(`找不到周期表模型选择器主进程脚本：${PERIODIC_MODEL_MAIN_IPC_SCRIPT}`);
+  if (!fs.existsSync(WIN_NOTIFY_MAIN_SCRIPT)) throw new Error(`找不到通知跳转主进程脚本：${WIN_NOTIFY_MAIN_SCRIPT}`);
 
   if (!skipLint) {
     const dict = JSON.parse(fs.readFileSync(dictPath, 'utf8'));
     const gloss = fs.existsSync(glossaryPath) ? fs.readFileSync(glossaryPath, 'utf8') : null;
     const lr = lintDict(dict, gloss);
     if (lr.errors > 0) throw new Error(`词典校验发现 ${lr.errors} 个错误，已中止`);
-    console.log(`预检 1/7（汉化词典 Lint）：通过（${lr.entries} 条，错误 0）`);
+    console.log(`预检 1/9（汉化词典 Lint）：通过（${lr.entries} 条，错误 0）`);
   }
   execFileSync(process.execPath, ['--check', SLOT_SCRIPT], { stdio: 'pipe' });
   execFileSync(process.execPath, ['--check', QUOTA_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 2/7（周额度插槽与主进程配置桥语法）：通过');
+  console.log('预检 2/9（周额度插槽与主进程配置桥语法）：通过');
 
   execFileSync(process.execPath, ['--check', FILE_MENU_PRELOAD_SCRIPT], { stdio: 'pipe' });
   execFileSync(process.execPath, ['--check', FILE_MENU_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 3/7（文件右键菜单 preload 与主进程 IPC 语法）：通过');
+  console.log('预检 3/9（文件右键菜单 preload 与主进程 IPC 语法）：通过');
 
   execFileSync(process.execPath, ['--check', TOKEN_METER_PRELOAD_SCRIPT], { stdio: 'pipe' });
   execFileSync(process.execPath, ['--check', TOKEN_METER_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 4/7（实时 Tokens 统计 preload 与主进程 IPC 语法）：通过');
+  console.log('预检 4/9（实时 Tokens 统计 preload 与主进程 IPC 语法）：通过');
 
   execFileSync(process.execPath, ['--check', PERIODIC_MODEL_PRELOAD_SCRIPT], { stdio: 'pipe' });
-  console.log('预检 5/7（周期表模型选择器 preload 语法）：通过');
+  execFileSync(process.execPath, ['--check', PERIODIC_MODEL_MAIN_IPC_SCRIPT], { stdio: 'pipe' });
+  console.log('预检 5/9（周期表模型选择器 preload 与主进程 IPC 语法）：通过');
 
   const promptSizes = validatePrompts();
   const lsDry = applyLsTitlePatch({
@@ -346,7 +410,19 @@ function runPreflight({ skipLint = false } = {}) {
     version: appInfo().version,
     dryRun: true,
   });
-  console.log(`预检 6/7（中文对话标题提示词校验）：通过（${promptSizes.patchedBytes} 字节，状态 ${lsDry.status}，偏移 0x${lsDry.offset.toString(16)}）`);
+  console.log(`预检 6/9（中文对话标题提示词校验）：通过（${promptSizes.patchedBytes} 字节，状态 ${lsDry.status}，偏移 0x${lsDry.offset.toString(16)}）`);
+
+  const stepsMetaInfo = validateTargets();
+  const stepsDry = applyLsStepsPatch({
+    lsPath: LS_EXE,
+    metaFile: LS_STEPS_META_FILE,
+    version: appInfo().version,
+    dryRun: true,
+  });
+  console.log(`预检 7/9（中文步骤与状态提示词校验）：通过（${stepsMetaInfo.count} 处共 ${stepsMetaInfo.totalBytes} 字节，状态 ${stepsDry.status}，${stepsDry.patchedCount}/${stepsDry.totalCount}）`);
+
+  execFileSync(process.execPath, ['--check', WIN_NOTIFY_MAIN_SCRIPT], { stdio: 'pipe' });
+  console.log('预检 8/9（Windows 通知跳转修复主进程脚本语法）：通过');
 }
 
 function killStaleWatchers() {
@@ -398,16 +474,31 @@ async function main() {
           missing: '未找到 language_server.exe',
           error: '检查失败',
         }[st.zhTitleStatus] || st.zhTitleStatus);
+      const zhStepsText = st.zhStepsPatched
+        ? `已注入（${st.zhStepsPatchedCount}/${st.zhStepsTotalCount}）`
+        : ({
+          unpatched: `未注入（0/${st.zhStepsTotalCount}）`,
+          partial: `部分注入（${st.zhStepsPatchedCount}/${st.zhStepsTotalCount}）`,
+          outdated_patch: '旧版补丁待升级',
+          prompt_changed: '上游提示词已变更',
+          not_found: '未找到目标描述',
+          ambiguous: '匹配位置不唯一',
+          overlap: '命中区间存在重叠',
+          missing: '未找到 language_server.exe',
+          error: '检查失败',
+        }[st.zhStepsStatus] || st.zhStepsStatus);
       console.log(`客户端版本：${st.version}（词典基准版本：${st.dictVersion || '未知'}）`);
       console.log(`汉化补丁（agy-zh-cn）        ：${st.zhPatched ? '已注入' : '未注入'}`);
       console.log(`周额度补丁（agy-weekly-quota）：${st.quotaPatched ? '已注入' : '未注入'}`);
       console.log(`文件菜单补丁（agy-file-menu） ：${st.fileMenuPatched ? '已注入' : '未注入'}`);
       console.log(`Tokens 补丁（agy-token-meter）：${st.tokenMeterPatched ? '已注入' : '未注入'}`);
       console.log(`周期表补丁（agy-periodic-model）：${st.periodicModelPatched ? '已注入' : '未注入'}`);
+      console.log(`通知跳转补丁（agy-win-notify）：${st.winNotifyPatched ? '已注入' : '未注入'}`);
       console.log(`中文标题补丁（agy-zh-title）  ：${zhTitleText}`);
+      console.log(`中文步骤补丁（agy-zh-steps）  ：${zhStepsText}`);
       console.log(`共享纯净备份（${st.backupDir}）：${st.backups.length ? st.backups.map((b) => `${b.version}${b.matches ? '（匹配）' : '（旧版）'}`).join('，') : '无'}`);
       if (st.dictVersion && st.dictVersion !== st.version) {
-        console.log(`提示：客户端已升级至 ${st.version}（词典为 ${st.dictVersion}），重打补丁可立即恢复现有六项补丁；若发现新增英文可后续增量补译。`);
+        console.log(`提示：客户端已升级至 ${st.version}（词典为 ${st.dictVersion}），重打补丁可立即恢复现有八项补丁；若发现新增英文可后续增量补译。`);
       }
     }
     return;
@@ -434,10 +525,10 @@ async function main() {
   if (action === 'patch') {
     runPreflight({ skipLint: args.has('--no-lint') });
     await applyCombinedPatch({ dryRun: true });
-    console.log('预检 7/7（六补丁合并重打包与标题提示词 dry-run）：通过');
+    console.log('预检 9/9（八补丁合并重打包与二进制提示词 dry-run）：通过');
     const st = inspectState();
     if (st.dictVersion && st.dictVersion !== st.version) {
-      console.log(`提示：检测到客户端新版本 ${st.version}（词典版本 ${st.dictVersion}），本次将直接恢复六补丁并建立 ${st.version} 纯净备份。`);
+      console.log(`提示：检测到客户端新版本 ${st.version}（词典版本 ${st.dictVersion}），本次将直接恢复八补丁并建立 ${st.version} 纯净备份。`);
     }
   }
 
@@ -476,7 +567,7 @@ async function main() {
   }
 
   console.log(`\n已在后台准备就绪（PID=${pid}），当前检测到 ${activeAppProcs} 个 Antigravity 进程、${activeLsProcs} 个 language_server 进程。`);
-  console.log(`请关闭所有 Antigravity 窗口，后台会在约 3～5 秒内自动完成${action === 'patch' ? '六补丁注入' : '原版还原'}并重新打开应用。`);
+  console.log(`请关闭所有 Antigravity 窗口，后台会在约 3～5 秒内自动完成${action === 'patch' ? '八补丁注入' : '原版还原'}并重新打开应用。`);
   console.log(`日志文件：${LOG_FILE}`);
 }
 

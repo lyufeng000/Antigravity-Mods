@@ -6,7 +6,8 @@ import { execFileSync } from 'node:child_process';
 import { ASAR, EXE, appInfo } from './lib/app.mjs';
 import { loadDep } from './lib/deps.mjs';
 import {
-  BACKUP_DIR, WORK_ROOT, MARK_BEGIN, MARK_END, PRELOAD, PRELOAD_SCRIPT,
+  BACKUP_DIR, WORK_ROOT, MARK_BEGIN, MARK_END, MAIN_MARK_BEGIN, MAIN_MARK_END,
+  PRELOAD, MAIN_JS, PRELOAD_SCRIPT, MAIN_IPC_SCRIPT, EQUIV_COST_FILE,
   log, rmWork, isPatched, hasAnyPatch, headerFiles, runningCount, waitExit, relaunch, backupList,
   replaceFile, sha256File, isEntry, parseArgs,
 } from './lib/common.mjs';
@@ -20,6 +21,11 @@ export const stripPeriodicModelBlock = (code) => {
   return code.replace(re, '');
 };
 
+export const stripMainPeriodicModelBlock = (code) => {
+  const re = new RegExp(`\\r?\\n?${MAIN_MARK_BEGIN.replace(/[/*]/g, '\\$&')}[\\s\\S]*?${MAIN_MARK_END.replace(/[/*]/g, '\\$&')}\\r?\\n?`, 'g');
+  return code.replace(re, '');
+};
+
 export function buildPeriodicModelBlock(preloadScriptFile = PRELOAD_SCRIPT) {
   if (!fs.existsSync(preloadScriptFile)) throw new Error(`找不到周期表模型选择器 preload 脚本：${preloadScriptFile}`);
   const body = fs.readFileSync(preloadScriptFile, 'utf8')
@@ -29,6 +35,18 @@ export function buildPeriodicModelBlock(preloadScriptFile = PRELOAD_SCRIPT) {
     throw new Error('periodic-model-preload.js 内不应包含注入起止标记');
   }
   return `\n${MARK_BEGIN}\ntry {\n${body}\n} catch (e) { try { console.error('[agy-periodic-model]', e); } catch (_) {} }\n${MARK_END}\n`;
+}
+
+export function buildMainPeriodicModelBlock(mainIpcFile = MAIN_IPC_SCRIPT, storeFile = EQUIV_COST_FILE) {
+  if (!fs.existsSync(mainIpcFile)) throw new Error(`找不到周期表等效费用主进程脚本：${mainIpcFile}`);
+  const body = fs.readFileSync(mainIpcFile, 'utf8')
+    .replace(/__AGY_EQUIV_COST_FILE__/g, JSON.stringify(path.resolve(storeFile)))
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  if (body.includes(MAIN_MARK_BEGIN) || body.includes(MAIN_MARK_END)) {
+    throw new Error('periodic-model-main-ipc.js 内不应包含注入起止标记');
+  }
+  return `\n${MAIN_MARK_BEGIN}\ntry {\n${body}\n} catch (e) { try { console.error('[agy-periodic-model-main]', e); } catch (_) {} }\n${MAIN_MARK_END}\n`;
 }
 
 const nodeCheck = (file) => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
@@ -93,7 +111,7 @@ export function syncExecutable(origAsar, newAsar) {
   return changed;
 }
 
-export function compareHeaders(origAsar, newAsar, modified = new Set([PRELOAD])) {
+export function compareHeaders(origAsar, newAsar, modified = new Set([PRELOAD, MAIN_JS])) {
   const a = headerFiles(origAsar), b = headerFiles(newAsar);
   const errs = [];
   for (const p of a.keys()) if (!b.has(p)) errs.push(`新包缺少 ${p}`);
@@ -110,7 +128,7 @@ export function compareHeaders(origAsar, newAsar, modified = new Set([PRELOAD]))
   return { errs, files: a.size, unpacked };
 }
 
-export function compareDirs(dirA, dirB) {
+export function compareDirs(dirA, dirB, modified = new Set([PRELOAD, MAIN_JS])) {
   const errs = [];
   const walk = (a, b, rel = '') => {
     const ea = new Map(fs.readdirSync(a, { withFileTypes: true }).map((e) => [e.name, e]));
@@ -123,7 +141,7 @@ export function compareDirs(dirA, dirB) {
       const pa = path.join(a, n), pb = path.join(b, n);
       if (e.isDirectory() !== f.isDirectory()) errs.push(`类型变化 ${rel}${n}`);
       else if (e.isDirectory()) walk(pa, pb, `${rel}${n}/`);
-      else if (sha256File(pa) !== sha256File(pb)) errs.push(`内容不一致 ${rel}${n}`);
+      else if (!modified.has(`${rel}${n}`) && sha256File(pa) !== sha256File(pb)) errs.push(`内容不一致 ${rel}${n}`);
     }
   };
   walk(dirA, dirB);
@@ -134,6 +152,7 @@ async function main() {
   log(`===== agy-periodic-model patch 开始${DRY ? ' (DRY-RUN)' : ''} 目标 ${ASAR}`);
   if (!fs.existsSync(ASAR)) throw new Error(`找不到 ${ASAR}`);
   nodeCheck(PRELOAD_SCRIPT);
+  nodeCheck(MAIN_IPC_SCRIPT);
 
   const { version } = appInfo();
   log(`Antigravity 版本: ${version}`);
@@ -166,7 +185,9 @@ async function main() {
     asar.uncacheAll?.();
     asar.extractAll(ASAR, extractDir);
     const preloadFile = path.join(extractDir, ...PRELOAD.split('/'));
+    const mainFile = path.join(extractDir, ...MAIN_JS.split('/'));
     if (!fs.existsSync(preloadFile)) throw new Error(`包内未找到 ${PRELOAD}`);
+    if (!fs.existsSync(mainFile)) throw new Error(`包内未找到 ${MAIN_JS}`);
 
     const clean = stripPeriodicModelBlock(fs.readFileSync(preloadFile, 'utf8'));
     if (clean.includes(MARK_BEGIN) || clean.includes(MARK_END)) {
@@ -174,6 +195,13 @@ async function main() {
     }
     fs.writeFileSync(preloadFile, clean.replace(/\s*$/, '\n') + buildPeriodicModelBlock(PRELOAD_SCRIPT));
     nodeCheck(preloadFile);
+
+    const cleanMain = stripMainPeriodicModelBlock(fs.readFileSync(mainFile, 'utf8'));
+    if (cleanMain.includes(MAIN_MARK_BEGIN) || cleanMain.includes(MAIN_MARK_END)) {
+      throw new Error('main.js 中的旧周期表注入块不完整，无法安全剥离');
+    }
+    fs.writeFileSync(mainFile, cleanMain.replace(/\s*$/, '\n') + buildMainPeriodicModelBlock(MAIN_IPC_SCRIPT, EQUIV_COST_FILE));
+    nodeCheck(mainFile);
 
     const origFiles = headerFiles(ASAR);
     const unpack = unpackGlob(extractDir, origFiles);
@@ -185,10 +213,13 @@ async function main() {
 
     asar.uncacheAll?.();
     const newPreload = asar.extractFile(outAsar, PRELOAD).toString('utf8');
-    if (countMarks(newPreload) !== 1) throw new Error(`周期表注入块数量异常: ${countMarks(newPreload)}`);
+    const newMain = asar.extractFile(outAsar, MAIN_JS).toString('utf8');
+    if (countMarks(newPreload) !== 1) throw new Error(`周期表 preload 注入块数量异常: ${countMarks(newPreload)}`);
+    if (newMain.split(MAIN_MARK_BEGIN).length - 1 !== 1) throw new Error(`周期表 main 注入块数量异常: ${newMain.split(MAIN_MARK_BEGIN).length - 1}`);
 
     asar.extractAll(outAsar, verifyDir);
     nodeCheck(path.join(verifyDir, ...PRELOAD.split('/')));
+    nodeCheck(path.join(verifyDir, ...MAIN_JS.split('/')));
     const dirErrs = compareDirs(extractDir, verifyDir);
     if (dirErrs.length) throw new Error('再解包校验失败：\n  ' + dirErrs.slice(0, 20).join('\n  '));
 

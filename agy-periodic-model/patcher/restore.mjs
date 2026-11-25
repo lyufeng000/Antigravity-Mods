@@ -6,10 +6,12 @@ import { execFileSync } from 'node:child_process';
 import { ASAR, EXE, appInfo } from './lib/app.mjs';
 import { loadDep } from './lib/deps.mjs';
 import {
-  WORK_ROOT, PRELOAD, MARK_BEGIN, MARK_END, ANY_PATCH_RE,
-  log, rmWork, isPatched, hasAnyPatch, headerFiles, runningCount, waitExit, relaunch, backupList, replaceFile, isEntry, parseArgs,
+  WORK_ROOT, PRELOAD, MAIN_JS, MARK_BEGIN, MARK_END, MAIN_MARK_BEGIN, MAIN_MARK_END, ANY_PATCH_RE,
+  log, rmWork, hasPeriodicPatch, hasAnyPatch, headerFiles, runningCount, waitExit, relaunch, backupList, replaceFile, isEntry, parseArgs,
 } from './lib/common.mjs';
-import { stripPeriodicModelBlock, unpackGlob, syncExecutable, compareHeaders } from './patch.mjs';
+import {
+  stripPeriodicModelBlock, stripMainPeriodicModelBlock, unpackGlob, syncExecutable, compareHeaders,
+} from './patch.mjs';
 
 const asar = loadDep('@electron/asar');
 const args = parseArgs();
@@ -23,6 +25,7 @@ async function stripOnlyPeriodicModel() {
     asar.uncacheAll?.();
     asar.extractAll(ASAR, extractDir);
     const preloadFile = path.join(extractDir, ...PRELOAD.split('/'));
+    const mainFile = path.join(extractDir, ...MAIN_JS.split('/'));
 
     const cleanPreload = stripPeriodicModelBlock(fs.readFileSync(preloadFile, 'utf8'));
     if (cleanPreload.includes(MARK_BEGIN) || cleanPreload.includes(MARK_END)) {
@@ -31,16 +34,23 @@ async function stripOnlyPeriodicModel() {
     fs.writeFileSync(preloadFile, cleanPreload.replace(/\s*$/, '\n'));
     execFileSync(process.execPath, ['--check', preloadFile], { stdio: 'pipe' });
 
+    const cleanMain = stripMainPeriodicModelBlock(fs.readFileSync(mainFile, 'utf8'));
+    if (cleanMain.includes(MAIN_MARK_BEGIN) || cleanMain.includes(MAIN_MARK_END)) {
+      throw new Error('main.js 中的周期表等效费用注入块不完整，无法安全剥离');
+    }
+    fs.writeFileSync(mainFile, cleanMain.replace(/\s*$/, '\n'));
+    execFileSync(process.execPath, ['--check', mainFile], { stdio: 'pipe' });
+
     const origFiles = headerFiles(ASAR);
     const unpack = unpackGlob(extractDir, origFiles);
     await asar.createPackageWithOptions(extractDir, outAsar, unpack ? { unpack } : {});
     syncExecutable(ASAR, outAsar);
 
-    const cmp = compareHeaders(ASAR, outAsar);
+    const cmp = compareHeaders(ASAR, outAsar, new Set([PRELOAD, MAIN_JS]));
     if (cmp.errs.length) throw new Error('剥离后包头校验失败：\n  ' + cmp.errs.slice(0, 20).join('\n  '));
     replaceFile(outAsar, ASAR);
-    if (isPatched(ASAR)) throw new Error('剥离后仍检测到周期表模型选择器注入块');
-    log('已剥离周期表模型选择器注入块（保留其他补丁模块）');
+    if (hasPeriodicPatch(ASAR)) throw new Error('剥离后仍检测到周期表模型选择器注入块');
+    log('已剥离周期表模型选择器及等效费用注入块（保留其他补丁模块）');
   } finally {
     rmWork(work);
   }
@@ -50,7 +60,7 @@ async function main() {
   log(`===== agy-periodic-model restore 开始 目标 ${ASAR}`);
   if (args.has('--wait-exit')) await waitExit(EXE);
   const { version } = appInfo();
-  const patched = isPatched(ASAR);
+  const patched = hasPeriodicPatch(ASAR);
   const backups = backupList();
   const mine = backups.find((b) => b.version === version);
   log(`当前版本 ${version}，${patched ? '已' : '未'}打周期表模型选择器补丁；备份：${backups.map((b) => b.version).join(', ') || '无'}`);
@@ -65,8 +75,9 @@ async function main() {
     let otherPatchesRemain = ANY_PATCH_RE.test(strippedPreload);
     if (!otherPatchesRemain) {
       try {
-        const mainCode = asar.extractFile(ASAR, 'dist/main.js').toString('utf8');
-        otherPatchesRemain = ANY_PATCH_RE.test(mainCode);
+        const mainCode = asar.extractFile(ASAR, MAIN_JS).toString('utf8');
+        const strippedMain = stripMainPeriodicModelBlock(mainCode);
+        otherPatchesRemain = ANY_PATCH_RE.test(strippedMain);
       } catch { /* ignore */ }
     }
 
@@ -82,7 +93,7 @@ async function main() {
       if (runningCount(EXE)) throw new Error('Antigravity 正在运行，请先退出，或加 --wait-exit');
       if (hasAnyPatch(mine.file)) throw new Error('备份文件本身含注入块，拒绝还原');
       replaceFile(mine.file, ASAR);
-      if (isPatched(ASAR)) throw new Error('还原后仍检测到周期表模型选择器注入块');
+      if (hasPeriodicPatch(ASAR)) throw new Error('还原后仍检测到周期表模型选择器注入块');
       log(`已用 ${mine.file} 还原`);
     }
   }

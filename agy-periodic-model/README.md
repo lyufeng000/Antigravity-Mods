@@ -1,6 +1,6 @@
 # agy-periodic-model
 
-Antigravity 桌面端的 **Gemini 4 元素周期表模型选择器**补丁（复刻 Google AI Studio 的 *THE PERIODIC TABLE OF Gemini 4* 视觉），以独立标记块 `/*AGY-PERIODIC-MODEL-BEGIN*/ ... /*AGY-PERIODIC-MODEL-END*/` 注入 `dist/preload.js`，直接**原地替换**原版模型下拉菜单（`[data-testid="model-selector-panel"]`），不另弹新模态窗。
+Antigravity 桌面端的 **Gemini 4 元素周期表模型选择器**补丁（复刻 Google AI Studio 的 *THE PERIODIC TABLE OF Gemini 4* 视觉），以独立标记块 `/*AGY-PERIODIC-MODEL-BEGIN*/ ... /*AGY-PERIODIC-MODEL-END*/`（`dist/preload.js`）与 `/*AGY-PERIODIC-MODEL-MAIN-BEGIN*/ ... /*AGY-PERIODIC-MODEL-MAIN-END*/`（`dist/main.js`）注入，直接**原地替换**原版模型下拉菜单（`[data-testid="model-selector-panel"]`），不另弹新模态窗。
 
 ## 核心特性
 
@@ -8,6 +8,7 @@ Antigravity 桌面端的 **Gemini 4 元素周期表模型选择器**补丁（复
 - **18×6 完整化学元素周期表**：自动点亮当前账号可用的所有 `Gemini 4 <Element>` 模型（当前 `1 H`、`6 C`、`10 Ne`、`18 Ar`，未来新增自动点亮）；未支持元素置灰严禁选中（悬停可在下方预览中英文元素名）。
 - **推理档位与 Orchestrator 一键切换**：选中模型或思考等级后菜单保持打开，方便连续挑完模型和 `Low / Medium / High / XHigh`（或对应 `Orchestrator`）；点击空白处、`Esc` 或再次点底部模型按钮关闭。
 - **按分组显示周额度**：通过只读旁路 `RetrieveUserQuotaSummary`（零额外请求）展示所属模型分组的周额度百分比与悬停重置倒计时（Gemini 组 / Claude & GPT 组各自独立展示）。
+- **平均等效月 API 费用（按 Neon 计算）**：在顶栏工具区「原版」按钮右侧展示 `平均等效月API费用：$xx（按Neon计算）`。主进程每次启动 Antigravity 对每个登录邮箱最多执行 1 次增量对账（高精度 `remainingFraction` 跌幅配合 `transcript.jsonl` 分模型 Token 消耗），**Ultra 与 Pro 严格隔离不混合**，先按邮箱各自求均值再跨邮箱平均，并在 `agy-periodic-model/equiv-api-cost.json` 保留最近 20 次计算记录与可手动锁定修改的 Neon 单价。
 - **完整兼顾表外模型（二级菜单）**：面板顶栏内置 `All`、`其他模型` 与动态系列胶囊（`Orchestrator`、`Gemini`、`Claude`、`GPT`、`Custom`）以及搜索框，支持原地切换任意非表内模型。
 - **原版列表随时切换**：右上角点「原版」可原地切回官方窄列表（随时点「切回周期表」回来）；Best of N 多选模式自动透传原版。
 

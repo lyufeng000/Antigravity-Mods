@@ -1,0 +1,6 @@
+{
+  "name": "agy-compact-retitle",
+  "displayName": "压缩后自动重命名标题",
+  "description": "在自动压缩或手动 /compact 压缩完成后，触发 Agent 根据最新压缩摘要为当前对话重新起一个简体中文标题。",
+  "version": "0.1.0"
+}

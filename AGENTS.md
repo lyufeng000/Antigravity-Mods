@@ -12,7 +12,9 @@
   - `agy-file-menu/`：本地文件增强右键菜单
   - `agy-token-meter/`：输入框下方实时 `tok/s` 输出速度与 Tokens 用量
   - `agy-periodic-model/`：Gemini 4 元素周期表模型选择器（含二级菜单与周额度显示）
+  - `agy-win-notify/`：Windows 系统通知点击跳转修复（绑定 AUMID、保活 Notification、修复 BaseWindow 派发与强制窗口前置）
   - `agy-zh-title/`：中文对话标题生成（`language_server.exe` 提示词原位替换）
+  - `agy-zh-steps/`：中文步骤与状态摘要生成（`language_server.exe` 9 处步骤清单、焦点状态及 UI 标签约束原位替换）
   - 共享基础设施：`.backup/`（纯净原包与元信息池）、`repatch-all.mjs`（联合编排器）、`repatch.cmd`（一键入口）、`README.md`
 - **标准模块目录骨架**：新增或重构功能模块时，须按如下结构落盘：
 

@@ -1,0 +1,18 @@
+{
+  "compact-retitle": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./scripts/compact-retitle.mjs pre-invocation",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./scripts/compact-retitle.mjs stop",
+        "timeout": 10
+      }
+    ]
+  }
+}

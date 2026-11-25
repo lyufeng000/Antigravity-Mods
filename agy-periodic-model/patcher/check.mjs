@@ -3,8 +3,8 @@
 import fs from 'node:fs';
 import { ASAR, appInfo } from './lib/app.mjs';
 import {
-  PROJECT_DIR, PRELOAD_SCRIPT,
-  isPatched, backupList, parseArgs,
+  PROJECT_DIR, PRELOAD_SCRIPT, MAIN_IPC_SCRIPT, EQUIV_COST_FILE,
+  isPatched, isPreloadPatched, isMainPatched, backupList, parseArgs,
 } from './lib/common.mjs';
 
 const args = parseArgs();
@@ -12,12 +12,17 @@ const r = {
   projectDir: PROJECT_DIR,
   asar: ASAR,
   preloadScriptExists: fs.existsSync(PRELOAD_SCRIPT),
+  mainIpcScriptExists: fs.existsSync(MAIN_IPC_SCRIPT),
+  equivCostFile: EQUIV_COST_FILE,
+  equivCostFileExists: fs.existsSync(EQUIV_COST_FILE),
 };
 
 try {
   const buf = fs.readFileSync(ASAR);
   const raw = buf.toString('latin1');
   r.version = appInfo(ASAR).version;
+  r.periodicModelPreloadPatched = isPreloadPatched(ASAR);
+  r.periodicModelMainPatched = isMainPatched(ASAR);
   r.periodicModelPatched = isPatched(ASAR);
   r.zhPatched = raw.includes('/*AGY-ZH-BEGIN*/');
   r.quotaPatched = raw.includes('/*AGY-QUOTA-BEGIN*/');
@@ -39,11 +44,12 @@ if (args.has('--json')) {
   const L = [];
   L.push(`项目目录：${r.projectDir}`);
   L.push(`安装包：${r.asar}`);
-  L.push(`源码脚本：preload=${r.preloadScriptExists ? '就绪' : '缺失'}`);
+  L.push(`源码脚本：preload=${r.preloadScriptExists ? '就绪' : '缺失'}    mainIpc=${r.mainIpcScriptExists ? '就绪' : '缺失'}`);
+  L.push(`费用记录文件：${r.equivCostFile}（${r.equivCostFileExists ? '已存在' : '首次运行自动创建'}）`);
   if (r.error) {
     L.push(r.error);
   } else {
-    L.push(`版本：${r.version}    周期表选择器：${r.periodicModelPatched ? '已注入' : '未注入'}    汉化：${r.zhPatched ? '已注入' : '未注入'}    周额度：${r.quotaPatched ? '已注入' : '未注入'}    文件菜单：${r.fileMenuPatched ? '已注入' : '未注入'}    Tokens：${r.tokenMeterPatched ? '已注入' : '未注入'}`);
+    L.push(`版本：${r.version}    周期表选择器：${r.periodicModelPatched ? '已注入' : `未完整(preload=${r.periodicModelPreloadPatched ? '是' : '否'}, main=${r.periodicModelMainPatched ? '是' : '否'})`}    汉化：${r.zhPatched ? '已注入' : '未注入'}    周额度：${r.quotaPatched ? '已注入' : '未注入'}    文件菜单：${r.fileMenuPatched ? '已注入' : '未注入'}    Tokens：${r.tokenMeterPatched ? '已注入' : '未注入'}`);
   }
   L.push(`共享备份：${r.backup.length ? r.backup.map((b) => `${b.version}${b.matches ? '（与当前版本一致）' : '（与当前版本不一致）'}`).join('，') : '无'}`);
   console.log(L.join('\n'));

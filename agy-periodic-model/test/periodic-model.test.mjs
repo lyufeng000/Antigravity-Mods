@@ -93,7 +93,7 @@ function bootEnv(customCtrl = {}) {
   return { dom, popover, panel, nativeList, nativeFooter, ctrl, picked, openStates };
 }
 
-test('原地替换原生下拉面板：不弹新窗、保留底部查看用量、仅点亮 4 元素且未支持元素禁选', () => {
+test('原地替换原生下拉面板：不弹新窗、隐藏底部查看用量、去蓝点、且未支持元素禁用无预览不卡手', () => {
   const { dom, popover, panel, nativeList, nativeFooter, picked, openStates } = bootEnv();
   const doc = dom.window.document;
 
@@ -101,11 +101,12 @@ test('原地替换原生下拉面板：不弹新窗、保留底部查看用量�
   assert.equal(doc.getElementById('agy-periodic-model-root'), null);
   assert.equal(popover.getAttribute('data-agy-pm-popover'), '1');
   assert.equal(nativeList.getAttribute('data-agy-pm-hidden'), '1');
-  assert.equal(nativeFooter.getAttribute('data-agy-pm-hidden'), null, '应保留底部原生查看用量区域');
+  assert.equal(nativeFooter.getAttribute('data-agy-pm-hidden'), '1', '周期表模式下应隐藏底部原生查看用量区域');
 
   const inline = panel.querySelector('[data-testid="agy-periodic-model-inline"]');
   assert.ok(inline, '应在原生 panel 内部渲染周期表');
   assert.equal(inline.getAttribute('data-agy-zh-skip'), '1');
+  assert.equal(inline.querySelectorAll('.agy-pm-tab-dot').length, 0, '顶部页签不应显示蓝点');
 
   for (const sym of ['H', 'C', 'Ne', 'Ar']) {
     const cell = inline.querySelector(`[data-testid="agy-pm-element-${sym}"]`);
@@ -113,13 +114,18 @@ test('原地替换原生下拉面板：不弹新窗、保留底部查看用量�
     assert.equal(cell.getAttribute('data-supported'), 'true');
   }
 
-  // 未支持元素 Na 悬停可预览但严格禁选
+  // 未支持元素 Na 应彻底禁用、无 title 提示、且悬停/聚焦不会切换详情卡
   const naCell = inline.querySelector('[data-testid="agy-pm-element-Na"]');
   assert.equal(naCell.getAttribute('data-supported'), 'false');
+  assert.equal(naCell.disabled, true);
+  assert.equal(naCell.getAttribute('title'), null);
   naCell.dispatchEvent(new dom.window.MouseEvent('mouseenter', { bubbles: false }));
+  naCell.dispatchEvent(new dom.window.FocusEvent('focus', { bubbles: false }));
   const detail = inline.querySelector('[data-testid="agy-pm-detail-card"]');
-  assert.match(detail.textContent, /Sodium/);
-  assert.equal(detail.getAttribute('data-supported'), 'false');
+  assert.match(detail.textContent, /Gemini 4 Neon/);
+  assert.doesNotMatch(detail.textContent, /Sodium/);
+  assert.equal(detail.getAttribute('data-supported'), 'true');
+  assert.ok(detail.querySelectorAll('[data-testid="agy-pm-detail-effort"]').length > 0);
 
   naCell.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
   assert.equal(picked.length, 0);
@@ -192,22 +198,25 @@ test('二级菜单兼顾不在周期表里的模型，并支持精准选档位�
 });
 
 test('可在原版列表与周期表之间原地无损来回切换；Best of N 模式自动透传原版', () => {
-  const { dom, popover, panel, nativeList } = bootEnv();
+  const { dom, popover, panel, nativeList, nativeFooter } = bootEnv();
 
   // 切到原版列表
   panel.querySelector('[data-testid="agy-pm-native-btn"]').click();
   assert.equal(popover.getAttribute('data-agy-pm-popover'), null);
   assert.equal(nativeList.getAttribute('data-agy-pm-hidden'), null);
+  assert.equal(nativeFooter.getAttribute('data-agy-pm-hidden'), null);
 
   // 一键切回周期表
   panel.querySelector('[data-testid="agy-pm-back-periodic"]').click();
   assert.equal(popover.getAttribute('data-agy-pm-popover'), '1');
   assert.equal(nativeList.getAttribute('data-agy-pm-hidden'), '1');
+  assert.equal(nativeFooter.getAttribute('data-agy-pm-hidden'), '1');
 
   // Best of N 模式不替换原版
   const bon = bootEnv({ bestOfNConfig: { isBestOfNEnabled: true } });
   assert.equal(bon.panel.querySelector('[data-testid="agy-periodic-model-inline"]'), null);
   assert.equal(bon.nativeList.getAttribute('data-agy-pm-hidden'), null);
+  assert.equal(bon.nativeFooter.getAttribute('data-agy-pm-hidden'), null);
   dom.window.close();
   bon.dom.window.close();
 });
@@ -284,14 +293,20 @@ test('模拟真实 Electron Isolated World -> webFrame.executeJavaScript(Main Wo
   mainDom.window.close();
 });
 
-test('显示周额度而非 5 小时额度：按分组区分 Gemini 周额度与 Claude/GPT 周额度，且链式装饰器无冲突', async () => {
+test('右上角展示 4 个额度饼状图（含悬停说明），且详情卡与列表仅显示周额度不冒充 5 小时额度', async () => {
   const { dom, panel } = bootEnv();
   try {
     const api = dom.window.__AGY_PERIODIC_MODEL_API__;
 
-    // 尚未拉取周额度时，绝不把 5h quotaInfo (98%) 冒充展示
+    // 尚未拉取周额度时，详情卡绝不把 5h quotaInfo (98%) 冒充展示，顶部渲染 4 个占位饼图
     assert.equal(panel.querySelector('[data-testid="agy-pm-weekly-quota"]'), null);
     assert.doesNotMatch(panel.textContent, /98%/);
+    const placeholderPies = [...panel.querySelectorAll('[data-testid="agy-pm-quota-pie"]')];
+    assert.equal(placeholderPies.length, 4);
+    assert.deepEqual(
+      placeholderPies.map((p) => p.querySelector('.agy-pm-quota-pie-pct').textContent),
+      ['--', '--', '--', '--'],
+    );
 
     // 通过链式 __JETSKI_LS_CLIENT_DECORATOR__ 模拟原生客户端调用 retrieveUserQuotaSummary
     const fakeClient = {
@@ -325,18 +340,429 @@ test('显示周额度而非 5 小时额度：按分组区分 Gemini 周额度与
     await new Promise((r) => setTimeout(r, 30));
     api.scanPanels();
 
+    // 顶部右上角 4 个饼状图：含 SVG circle、百分比与悬停提示（指明是哪个额度）
+    const piesWrap = panel.querySelector('[data-testid="agy-pm-quota-pies"]');
+    assert.ok(piesWrap);
+    const pies = [...piesWrap.querySelectorAll('[data-testid="agy-pm-quota-pie"]')];
+    assert.equal(pies.length, 4);
+    assert.deepEqual(
+      pies.map((p) => p.querySelector('.agy-pm-quota-pie-pct').textContent),
+      ['44%', '94%', '90%', '97%'],
+    );
+    assert.deepEqual(
+      pies.map((p) => p.getAttribute('data-quota-title')),
+      ['Gemini · 周额度', 'Gemini · 5h 额度', 'Claude / GPT · 周额度', 'Claude / GPT · 5h 额度'],
+    );
+    for (const pie of pies) {
+      assert.equal(pie.querySelectorAll('svg circle').length, 2, '每个饼状图应含底圆与扇形 SVG circle');
+      assert.equal(pie.getAttribute('title'), null, '应禁用系统原生 title 悬停框，避免双重提示');
+      assert.ok(pie.querySelector('.agy-pm-quota-tip-title').textContent.length > 0);
+      assert.match(pie.querySelector('.agy-pm-quota-tip-meta').textContent, /剩余 \d+%/);
+    }
+
     // 周期表底部详情条（Gemini 4 Neon）应显示 Gemini 周额度 44%，绝不是 5h 的 94%
-    const detailQuota = panel.querySelector('[data-testid="agy-pm-detail-card"] [data-testid="agy-pm-weekly-quota"]');
+    const detailCard = panel.querySelector('[data-testid="agy-pm-detail-card"]');
+    const detailQuota = detailCard.querySelector('[data-testid="agy-pm-weekly-quota"]');
     assert.ok(detailQuota);
     assert.equal(detailQuota.textContent, '周额度 44%');
-    assert.doesNotMatch(panel.textContent, /94%/);
+    assert.doesNotMatch(detailCard.textContent, /94%/);
 
     // 切换到 Claude 分类应显示 3p 周额度 90%，绝不是 5h 的 97%
     panel.querySelector('[data-testid="agy-pm-tab-claude"]').click();
-    const claudeQuota = panel.querySelector('[data-testid="agy-pm-list-row"] [data-testid="agy-pm-weekly-quota"]');
+    const claudeRow = panel.querySelector('[data-testid="agy-pm-list-row"]');
+    const claudeQuota = claudeRow.querySelector('[data-testid="agy-pm-weekly-quota"]');
     assert.ok(claudeQuota);
     assert.equal(claudeQuota.textContent, '周额度 90%');
-    assert.doesNotMatch(panel.textContent, /97%/);
+    assert.doesNotMatch(claudeRow.textContent, /97%/);
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('统一 Orchestrator Planner 模式：选择 Carbon 的 Orchestrator 必须同步调用 orchestratorPick.select(Carbon)，绝不错误映射成 Neon', () => {
+  const models = sampleModels().map((m) => {
+    if (m.label === 'Orchestrator (Neon)') return { ...m, modelId: 'gemini-pro-orchestrator-neon' };
+    if (m.label === 'Orchestrator (Carbon)') return { ...m, modelId: 'gemini-pro-orchestrator-carbon' };
+    if (m.label === 'Orchestrator (Argon)') return { ...m, modelId: 'gemini-pro-orchestrator-argon' };
+    return { ...m, modelId: m.label.toLowerCase().replace(/[^a-z0-9]+/g, '-') };
+  });
+  const planners = models.filter((m) => /^Gemini 4 (Neon|Carbon|Argon) /.test(m.label));
+  const neonXHigh = models.find((m) => m.label === 'Gemini 4 Neon (XHigh)');
+  const carbonHigh = models.find((m) => m.label === 'Gemini 4 Carbon (High)');
+  const carbonMedium = models.find((m) => m.label === 'Gemini 4 Carbon (Medium)');
+
+  const dom = new JSDOM('<!doctype html><html class="dark"><body><button data-testid="model-selector-trigger">Gemini 4 Neon High</button></body></html>', {
+    url: 'http://127.0.0.1:51917/',
+    runScripts: 'outside-only',
+  });
+  const code = fs.readFileSync(PRELOAD_SCRIPT, 'utf8');
+  new vm.Script(code, { filename: 'periodic-model-preload.js' }).runInContext(dom.getInternalVMContext());
+
+  try {
+    const events = [];
+    const openStates = [];
+    const orchestratorPick = {
+      model: 0, // UNSPECIFIED（默认会落回 Neon XHigh）
+      select: (val) => {
+        events.push({ type: 'planner', value: val });
+        orchestratorPick.model = val;
+      },
+    };
+    const outerCtrl = {
+      selectedModel: models[0], // Gemini 4 Neon (High)
+      setSelectedModel: (m) => {
+        events.push({ type: 'model', label: m.label, value: m.value });
+        outerCtrl.selectedModel = m;
+      },
+      modelOptions: models,
+      modelSorts: [{ name: 'Recommended', groups: [{ groupName: '', options: models }] }],
+      open: true,
+      setIsOpen: (v) => openStates.push(v),
+      customModels: [],
+      bestOfNConfig: { isBestOfNEnabled: false },
+      orchestratorPick,
+    };
+    // 模拟真实 Antigravity Fiber 链路：panel -> v7c.Provider (含 orchestratorPlanners/DefaultPlanner) -> J7c (外层不关菜单的 setSelectedModel)
+    const providerValue = {
+      ...outerCtrl,
+      setSelectedModel: (m) => {
+        outerCtrl.setSelectedModel(m);
+        openStates.push(false);
+      },
+      orchestratorPlanners: planners,
+      orchestratorDefaultPlanner: neonXHigh,
+    };
+
+    const doc = dom.window.document;
+    const popover = doc.createElement('div');
+    popover.className = 'agy-overlay surface-glass bg-card';
+    const panel = doc.createElement('div');
+    panel.setAttribute('data-testid', 'model-selector-panel');
+    const nativeList = doc.createElement('div');
+    nativeList.innerHTML = '<div data-testid="model-selector-header">Model</div><span data-testid="model-selector-orchestrator-model">Gemini 4 Neon Extra High</span>';
+    panel.appendChild(nativeList);
+    popover.appendChild(panel);
+    panel.__reactFiber$test = {
+      memoizedProps: {},
+      return: {
+        memoizedProps: { value: providerValue },
+        return: {
+          memoizedProps: outerCtrl,
+          return: null,
+        },
+      },
+    };
+    doc.body.appendChild(popover);
+    dom.window.__AGY_PERIODIC_MODEL_API__.scanPanels();
+
+    // 1. 锁定 6 C (Carbon) 并点击 Orchestrator -> 必须先 orchestratorPick.select(427) 再 setSelectedModel(Orchestrator (Carbon))
+    panel.querySelector('[data-testid="agy-pm-quick-C"]').click();
+    const orchBtn = panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]');
+    assert.ok(orchBtn);
+    assert.equal(orchBtn.getAttribute('role'), 'switch');
+    assert.equal(orchBtn.getAttribute('aria-checked'), 'false');
+    orchBtn.click();
+
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonHigh.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.deepEqual(openStates, [], '应沿用外层 J7c 的 setSelectedModel，保持菜单打开');
+    const activeOrchBtn = panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]');
+    assert.ok(activeOrchBtn.classList.contains('is-active'));
+    assert.equal(activeOrchBtn.getAttribute('aria-checked'), 'true');
+    assert.equal(activeOrchBtn.textContent, 'Orchestrator');
+    assert.ok(panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="high"].is-active'));
+    assert.match(panel.textContent, /Orchestrator · Gemini 4 Carbon \(High\)/);
+
+    // 切到 Neon 预览时，Neon 的 Orchestrator 按钮不应错误高亮
+    panel.querySelector('[data-testid="agy-pm-quick-Ne"]').click();
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"].is-active'), null);
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'false');
+
+    // 2. 在 Orchestrator 分类页签里可直接精准选择 Carbon 的 Medium 规划器
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-tab-orchestrator"]').click();
+    const carbonOrchRow = panel.querySelector('[data-testid="agy-pm-list-row"][data-model-base="Orchestrator · Gemini 4 Carbon"]');
+    assert.ok(carbonOrchRow, 'Orchestrator 分类应按 planner 分组展示 Orchestrator · Gemini 4 Carbon');
+    const medBtn = carbonOrchRow.querySelector('[data-testid="agy-pm-list-effort"][data-model-label="Gemini 4 Carbon (Medium)"]');
+    assert.ok(medBtn);
+    medBtn.click();
+
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonMedium.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.ok(
+      panel.querySelector('[data-testid="agy-pm-list-row"][data-model-base="Orchestrator · Gemini 4 Carbon"] [data-model-label="Gemini 4 Carbon (Medium)"].is-active'),
+    );
+
+    // 3. 切回周期表后关闭 Carbon 的 Orchestrator 开关 -> 保留 Medium 档位退出；再次开启仍保留 Medium
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-tab-periodic"]').click();
+    panel.querySelector('[data-testid="agy-pm-quick-C"]').click();
+    panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').click();
+    assert.deepEqual(events, [
+      { type: 'model', label: 'Gemini 4 Carbon (Medium)', value: carbonMedium.value },
+    ]);
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'false');
+    assert.ok(panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="medium"].is-active'));
+
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').click();
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonMedium.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'true');
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('统一 Orchestrator 模式打开面板时，即便底层 selectedModel 是 Orchestrator (Neon)，只要 planner 为 Carbon 就自动锁定并高亮 Carbon', () => {
+  const models = sampleModels().map((m) => {
+    if (m.label === 'Orchestrator (Neon)') return { ...m, modelId: 'gemini-pro-orchestrator-neon' };
+    if (m.label === 'Orchestrator (Carbon)') return { ...m, modelId: 'gemini-pro-orchestrator-carbon' };
+    if (m.label === 'Orchestrator (Argon)') return { ...m, modelId: 'gemini-pro-orchestrator-argon' };
+    return { ...m, modelId: m.label.toLowerCase().replace(/[^a-z0-9]+/g, '-') };
+  });
+  const planners = models.filter((m) => /^Gemini 4 (Neon|Carbon|Argon) /.test(m.label));
+  const orchNeon = models.find((m) => m.label === 'Orchestrator (Neon)');
+  const neonXHigh = models.find((m) => m.label === 'Gemini 4 Neon (XHigh)');
+
+  const dom = new JSDOM('<!doctype html><html class="dark"><body></body></html>', {
+    url: 'http://127.0.0.1:51917/',
+    runScripts: 'outside-only',
+  });
+  new vm.Script(fs.readFileSync(PRELOAD_SCRIPT, 'utf8'), { filename: 'periodic-model-preload.js' }).runInContext(dom.getInternalVMContext());
+
+  try {
+    const outerCtrl = {
+      selectedModel: orchNeon,
+      setSelectedModel() {},
+      modelOptions: models,
+      modelSorts: [{ name: 'Recommended', groups: [{ groupName: '', options: models }] }],
+      open: true,
+      setIsOpen() {},
+      customModels: [],
+      bestOfNConfig: { isBestOfNEnabled: false },
+      orchestratorPick: { model: 0, select() {} }, // UNSPECIFIED，依赖用户全局设置（由原生 DOM 文本透出）
+    };
+    const providerValue = {
+      ...outerCtrl,
+      orchestratorPlanners: planners,
+      orchestratorDefaultPlanner: neonXHigh,
+    };
+
+    const doc = dom.window.document;
+    const popover = doc.createElement('div');
+    popover.className = 'agy-overlay';
+    const panel = doc.createElement('div');
+    panel.setAttribute('data-testid', 'model-selector-panel');
+    const nativeList = doc.createElement('div');
+    nativeList.innerHTML = '<div data-testid="model-selector-header">Model</div><span data-testid="model-selector-orchestrator-model">Gemini 4 Carbon High</span>';
+    panel.appendChild(nativeList);
+    popover.appendChild(panel);
+    panel.__reactFiber$test = {
+      memoizedProps: {},
+      return: {
+        memoizedProps: { value: providerValue },
+        return: { memoizedProps: outerCtrl, return: null },
+      },
+    };
+    doc.body.appendChild(popover);
+    dom.window.__AGY_PERIODIC_MODEL_API__.scanPanels();
+
+    const detail = panel.querySelector('[data-testid="agy-pm-detail-card"]');
+    assert.match(detail.textContent, /Gemini 4 Carbon/);
+    const orchSwitch = detail.querySelector('[data-testid="agy-pm-detail-orchestrator"]');
+    assert.ok(orchSwitch.classList.contains('is-active'));
+    assert.equal(orchSwitch.getAttribute('role'), 'switch');
+    assert.equal(orchSwitch.getAttribute('aria-checked'), 'true');
+    assert.equal(orchSwitch.textContent, 'Orchestrator');
+    assert.ok(detail.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="high"].is-active'));
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('Orchestrator 开关保留左侧思考等级 + 切元素就近降档（XHigh -> High，不掉到 Medium）', () => {
+  const models = sampleModels().map((m) => {
+    if (m.label === 'Orchestrator (Neon)') return { ...m, modelId: 'gemini-pro-orchestrator-neon' };
+    if (m.label === 'Orchestrator (Carbon)') return { ...m, modelId: 'gemini-pro-orchestrator-carbon' };
+    if (m.label === 'Orchestrator (Argon)') return { ...m, modelId: 'gemini-pro-orchestrator-argon' };
+    return { ...m, modelId: m.label.toLowerCase().replace(/[^a-z0-9]+/g, '-') };
+  });
+  const planners = models.filter((m) => /^Gemini 4 (Neon|Carbon|Argon) /.test(m.label));
+  const neonXHigh = models.find((m) => m.label === 'Gemini 4 Neon (XHigh)');
+  const carbonHigh = models.find((m) => m.label === 'Gemini 4 Carbon (High)');
+  const carbonMedium = models.find((m) => m.label === 'Gemini 4 Carbon (Medium)');
+  const hydrogenHigh = models.find((m) => m.label === 'Gemini 4 Hydrogen (High)');
+
+  const dom = new JSDOM('<!doctype html><html class="dark"><body></body></html>', {
+    url: 'http://127.0.0.1:51917/',
+    runScripts: 'outside-only',
+  });
+  new vm.Script(fs.readFileSync(PRELOAD_SCRIPT, 'utf8'), { filename: 'periodic-model-preload.js' }).runInContext(dom.getInternalVMContext());
+
+  try {
+    const events = [];
+    const orchestratorPick = {
+      model: 0,
+      select: (val) => {
+        events.push({ type: 'planner', value: val });
+        orchestratorPick.model = val;
+      },
+    };
+    const outerCtrl = {
+      selectedModel: neonXHigh, // 起始在 Gemini 4 Neon (XHigh)
+      setSelectedModel: (m) => {
+        events.push({ type: 'model', label: m.label, value: m.value });
+        outerCtrl.selectedModel = m;
+      },
+      modelOptions: models,
+      modelSorts: [{ name: 'Recommended', groups: [{ groupName: '', options: models }] }],
+      open: true,
+      setIsOpen() {},
+      customModels: [],
+      bestOfNConfig: { isBestOfNEnabled: false },
+      orchestratorPick,
+    };
+    const providerValue = {
+      ...outerCtrl,
+      orchestratorPlanners: planners,
+      orchestratorDefaultPlanner: neonXHigh,
+    };
+
+    const doc = dom.window.document;
+    const popover = doc.createElement('div');
+    popover.className = 'agy-overlay';
+    const panel = doc.createElement('div');
+    panel.setAttribute('data-testid', 'model-selector-panel');
+    const nativeList = doc.createElement('div');
+    nativeList.innerHTML = '<div data-testid="model-selector-header">Model</div><span data-testid="model-selector-orchestrator-model">Gemini 4 Neon Extra High</span>';
+    panel.appendChild(nativeList);
+    popover.appendChild(panel);
+    panel.__reactFiber$test = {
+      memoizedProps: {},
+      return: {
+        memoizedProps: { value: providerValue },
+        return: { memoizedProps: outerCtrl, return: null },
+      },
+    };
+    doc.body.appendChild(popover);
+    dom.window.__AGY_PERIODIC_MODEL_API__.scanPanels();
+
+    // 1. 从 Neon (XHigh) 点 6 C -> 就近降档为 Gemini 4 Carbon (High)，绝不掉到 Medium
+    panel.querySelector('[data-testid="agy-pm-element-C"]').click();
+    assert.deepEqual(events, [
+      { type: 'model', label: 'Gemini 4 Carbon (High)', value: carbonHigh.value },
+    ]);
+
+    // 2. 在 Carbon (High) 上打开 Orchestrator 开关 -> 沿用 High
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').click();
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonHigh.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.ok(panel.querySelector('[data-testid="agy-pm-element-C"].is-selected'));
+    assert.ok(panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="high"].is-active'));
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'true');
+
+    // 3. Orchestrator 开启状态下点左侧 Medium -> 保持 Orchestrator 开启，只改规划器到 Medium
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="medium"]').click();
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonMedium.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.ok(panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="medium"].is-active'));
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'true');
+
+    // 4. 关闭 Orchestrator 开关 -> 退出到普通 Gemini 4 Carbon (Medium)，保留 Medium
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').click();
+    assert.deepEqual(events, [
+      { type: 'model', label: 'Gemini 4 Carbon (Medium)', value: carbonMedium.value },
+    ]);
+    assert.ok(panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="medium"].is-active'));
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'false');
+
+    // 5. 再次打开 Orchestrator 开关 -> 仍保留 Medium
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').click();
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonMedium.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'true');
+
+    // 6. 在 Orchestrator · Neon (XHigh) 下点 6 C -> 保持 Orchestrator 模式并就近降档到 Carbon (High)
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-element-Ne"]').click();
+    panel.querySelector('[data-testid="agy-pm-detail-effort"][data-effort="xhigh"]').click();
+    assert.equal(orchestratorPick.model, neonXHigh.value);
+
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-element-C"]').click();
+    assert.deepEqual(events, [
+      { type: 'planner', value: carbonHigh.value },
+      { type: 'model', label: 'Orchestrator (Carbon)', value: 667 },
+    ]);
+    assert.equal(panel.querySelector('[data-testid="agy-pm-detail-orchestrator"]').getAttribute('aria-checked'), 'true');
+
+    // 7. 在 Orchestrator · Carbon (High) 下点击不支持 Orchestrator 的 1 H -> 退回普通 Gemini 4 Hydrogen (High)，保留 High
+    events.length = 0;
+    panel.querySelector('[data-testid="agy-pm-element-H"]').click();
+    assert.deepEqual(events, [
+      { type: 'model', label: 'Gemini 4 Hydrogen (High)', value: hydrogenHigh.value },
+    ]);
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('顶栏原版按钮右侧展示平均等效月API费用：$xx（按Neon计算），并随状态同步更新', async () => {
+  const { dom, panel } = bootEnv();
+  try {
+    const tools = panel.querySelector('.agy-pm-tools');
+    assert.ok(tools);
+    const nativeBtn = tools.querySelector('[data-testid="agy-pm-native-btn"]');
+    const equivBox = tools.querySelector('[data-testid="agy-pm-equiv-cost"]');
+    assert.ok(nativeBtn && equivBox, '应在原版按钮右侧渲染等效月 API 费用栏');
+    assert.equal(nativeBtn.nextElementSibling, equivBox.parentElement);
+    assert.equal(equivBox.querySelector('.agy-pm-equiv-cost-text').textContent, '平均等效月API费用：--（按Neon计算）');
+
+    dom.window.__AGY_PERIODIC_MODEL_API__.setEquivCostState({
+      activeEmail: 'u1@gmail.com',
+      activeTier: 'ultra',
+      activeTierLabel: 'Google AI Ultra',
+      avgMonthlyUsd: 245.4,
+      accountBreakdown: [
+        { email: 'u1@gmail.com', avgMonthlyUsd: 210, sampleCount: 3 },
+        { email: 'u2@gmail.com', avgMonthlyUsd: 280.8, sampleCount: 1 },
+      ],
+      totalMatchedSamples: 4,
+      totalRecords: 6,
+      maxRecords: 20,
+      neonPricing: { inputPerMillion: 2, cacheReadPerMillion: 0.2, outputPerMillion: 12, source: 'live' },
+    });
+
+    const updatedBox = panel.querySelector('[data-testid="agy-pm-equiv-cost"]');
+    assert.equal(updatedBox.querySelector('.agy-pm-equiv-cost-text').textContent, '平均等效月API费用：$245（按Neon计算）');
+    const styleText = panel.ownerDocument.getElementById('agy-periodic-model-style')?.textContent || '';
+    assert.doesNotMatch(styleText, /\.agy-pm-equiv-cost[^}]*line-height:\s*1\b/, '等效费用文本行高不得为 1，防止裁剪中文字符下沿');
+    assert.match(styleText, /\.agy-pm-equiv-cost-text[^}]*line-height:\s*25px/);
+    assert.match(updatedBox.textContent, /Google AI Ultra · Ultra\/Pro 不混合/);
+    assert.match(updatedBox.textContent, /u1@gmail\.com：\$210\/月（3 次采样均值）/);
+    assert.match(updatedBox.textContent, /最近 6\/20 次/);
+
+    // 重复扫描不变数据时不重建等效费用节点
+    const boxRef = updatedBox;
+    dom.window.__AGY_PERIODIC_MODEL_API__.scanPanels();
+    assert.equal(panel.querySelector('[data-testid="agy-pm-equiv-cost"]'), boxRef);
   } finally {
     dom.window.close();
   }

@@ -36,11 +36,17 @@
 
   Object.defineProperty(g, '__AGY_PERIODIC_MODEL_BOOTED__', { value: true });
 
+  var EQUIV_UP_KEY = '__agy_pm_equiv_up_v1__';
+  var EQUIV_DOWN_KEY = '__agy_pm_equiv_down_v1__';
+
   // 注入到 Main World 的原地周期表选择器（自包含，不依赖外层闭包）
-  function installPeriodicModelSelector() {
+  function installPeriodicModelSelector(equivUpKey, equivDownKey) {
     var w = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : null);
     if (!w || !w.document || w.__AGY_PERIODIC_MODEL_MAIN_BOOTED__) return;
     Object.defineProperty(w, '__AGY_PERIODIC_MODEL_MAIN_BOOTED__', { value: true });
+
+    var UP_KEY = equivUpKey || '__agy_pm_equiv_up_v1__';
+    var DOWN_KEY = equivDownKey || '__agy_pm_equiv_down_v1__';
 
     var STYLE_ID = 'agy-periodic-model-style';
     var INLINE_ATTR = 'data-agy-pm-inline';
@@ -253,12 +259,186 @@
       return (remMins > 0 ? (remMins + '分钟') : '不足 1 分钟') + '后重置';
     }
 
-    // 仅旁路只读采集各模型分组的周额度（window === 'weekly'），绝不展示 5h 短期窗口额度
+    // 旁路只读采集各模型分组额度：周额度用于模型标签，全部分组桶用于顶部 4 饼图概览
     var weeklyQuotaStore = {
       byModelBase: {}, // lower(modelBase) -> { percent, resetTimeMs, description, groupName }
       byFamily: {},    // 'gemini' | '3p' -> { percent, resetTimeMs, description, groupName }
+      allBuckets: [],  // 全部可用窗口额度，用于顶部 4 饼图展示
+      geminiWeeklyRaw: null, // { remainingFraction, resetTimeMs, bucketId, disabled, ts }
       version: 0,
     };
+
+    var equivCostStore = {
+      raw: '',
+      state: null,
+      version: 0,
+    };
+
+    function readEquivCostFromBridge() {
+      try {
+        if (!w.sessionStorage) return;
+        var raw = w.sessionStorage.getItem(DOWN_KEY);
+        if (!raw) return;
+        if (equivCostStore.raw === raw) return;
+        var parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          equivCostStore.raw = raw;
+          equivCostStore.state = parsed;
+          equivCostStore.version += 1;
+        }
+      } catch (_) {}
+    }
+
+    var equivUpState = {
+      userSeq: 0,
+      user: null,
+      signOutSeq: 0,
+      signOutAt: 0,
+      quotaSeq: 0,
+      quota: null,
+      pricingSeq: 0,
+      pricing: [],
+    };
+    var seenPricingKeys = {};
+
+    function publishEquivUp() {
+      try {
+        if (w.sessionStorage) {
+          w.sessionStorage.setItem(UP_KEY, JSON.stringify(equivUpState));
+        }
+        w.dispatchEvent(new w.Event(UP_KEY));
+      } catch (_) {}
+    }
+
+    function classifyTierFromUserStatus(us) {
+      if (!us || typeof us !== 'object') return { tier: 'unknown', tierName: '' };
+      var parts = [];
+      var rawName = '';
+      var ut = us.userTier;
+      if (ut && typeof ut === 'object') {
+        if (typeof ut.id === 'string' && ut.id.trim()) parts.push(ut.id.trim());
+        if (typeof ut.name === 'string' && ut.name.trim()) {
+          parts.push(ut.name.trim());
+          rawName = ut.name.trim();
+        }
+        if (typeof ut.description === 'string' && ut.description.trim()) parts.push(ut.description.trim());
+      }
+      if (typeof us.g1Tier === 'string' && us.g1Tier.trim()) {
+        parts.push(us.g1Tier.trim());
+        if (!rawName) rawName = us.g1Tier.trim();
+      }
+      var psPlan = us.planStatus && us.planStatus.planInfo;
+      var pi = us.planInfo || psPlan;
+      if (pi && typeof pi === 'object') {
+        if (typeof pi.planName === 'string' && pi.planName.trim()) {
+          parts.push(pi.planName.trim());
+          if (!rawName) rawName = pi.planName.trim();
+        }
+        if (pi.teamsTier !== undefined && pi.teamsTier !== null) parts.push(String(pi.teamsTier));
+      }
+      if (psPlan && psPlan !== pi && typeof psPlan === 'object') {
+        if (typeof psPlan.planName === 'string' && psPlan.planName.trim()) parts.push(psPlan.planName.trim());
+        if (psPlan.teamsTier !== undefined && psPlan.teamsTier !== null) parts.push(String(psPlan.teamsTier));
+      }
+      var text = parts.join(' ').toLowerCase();
+      if (!text) return { tier: 'unknown', tierName: '' };
+      if (/ultra|g1-ultra|pro_ultimate|teams_ultimate/.test(text)) return { tier: 'ultra', tierName: rawName || 'Ultra' };
+      if (/\bpro\b|g1-pro|teams_tier_pro|\bpro[-_ ]tier\b/.test(text)) return { tier: 'pro', tierName: rawName || 'Pro' };
+      if (/\bfree\b|standard-tier|\bfree[-_ ]tier\b/.test(text)) return { tier: 'free', tierName: rawName || 'Free' };
+      return { tier: 'unknown', tierName: rawName };
+    }
+
+    function collectPricingInfosFromUpdate(update) {
+      if (!update || typeof update !== 'object' || !update.costSummary) return;
+      var cs = update.costSummary;
+      var candidates = [cs.pricing];
+      if (cs.total && typeof cs.total === 'object') {
+        if (cs.total.cumulativeTotal) candidates.push(cs.total.cumulativeTotal.pricing);
+        if (cs.total.turn) candidates.push(cs.total.turn.pricing);
+      }
+      var added = [];
+      for (var i = 0; i < candidates.length; i++) {
+        var p = candidates[i];
+        if (!p || typeof p !== 'object') continue;
+        var modelName = typeof p.modelName === 'string' ? p.modelName.trim() : '';
+        var inp = typeof p.inputPricePerMillionTokens === 'number' ? p.inputPricePerMillionTokens : 0;
+        var out = typeof p.outputPricePerMillionTokens === 'number' ? p.outputPricePerMillionTokens : 0;
+        var cache = typeof p.cacheReadPricePerMillionTokens === 'number' ? p.cacheReadPricePerMillionTokens : 0;
+        if (!modelName || !(inp > 0) || !(out > 0)) continue;
+        var sig = modelName + ':' + inp + ':' + cache + ':' + out + ':' + (p.isEstimated ? '1' : '0');
+        if (seenPricingKeys[sig]) continue;
+        seenPricingKeys[sig] = true;
+        added.push({
+          modelName: modelName,
+          inputPricePerMillionTokens: inp,
+          cacheReadPricePerMillionTokens: cache,
+          outputPricePerMillionTokens: out,
+          isEstimated: Boolean(p.isEstimated),
+        });
+      }
+      if (added.length) {
+        equivUpState.pricing = added;
+        equivUpState.pricingSeq += 1;
+        publishEquivUp();
+      }
+    }
+
+    function wrapReadOnlyAgentStream(iterable) {
+      if (!iterable || typeof iterable[Symbol.asyncIterator] !== 'function') return iterable;
+      var origIter = iterable[Symbol.asyncIterator]();
+      var wrapped = {};
+      wrapped[Symbol.asyncIterator] = function () { return wrapped; };
+      wrapped.next = function () {
+        var p = origIter.next.apply(origIter, arguments);
+        Promise.resolve(p).then(function (step) {
+          if (step && !step.done && step.value) {
+            try {
+              var payload = (step.value.update && typeof step.value.update === 'object') ? step.value.update : step.value;
+              collectPricingInfosFromUpdate(payload);
+            } catch (_) {}
+          }
+        }, function () {});
+        return p;
+      };
+      if (typeof origIter['return'] === 'function') {
+        wrapped['return'] = function () { return origIter['return'].apply(origIter, arguments); };
+      }
+      if (typeof origIter['throw'] === 'function') {
+        wrapped['throw'] = function () { return origIter['throw'].apply(origIter, arguments); };
+      }
+      return wrapped;
+    }
+
+    function formatQuotaBucketLabels(grp, b) {
+      var gName = (grp && typeof grp.displayName === 'string' ? grp.displayName : '').trim();
+      var gLower = gName.toLowerCase();
+      var win = (b && typeof b.window === 'string' ? b.window : '').trim().toLowerCase();
+      var bid = (b && typeof b.bucketId === 'string' ? b.bucketId : '').trim().toLowerCase();
+      var family = 'other';
+      if (gLower.indexOf('gemini') !== -1 || bid.indexOf('gemini') !== -1) {
+        family = 'gemini';
+      } else if (gLower.indexOf('claude') !== -1 || gLower.indexOf('gpt') !== -1 || bid.indexOf('3p') !== -1) {
+        family = '3p';
+      }
+      var groupLabel = family === 'gemini' ? 'Gemini' : (family === '3p' ? 'Claude / GPT' : (gName || '额度'));
+      var windowLabel = '';
+      if (win === 'weekly' || bid.indexOf('weekly') !== -1) {
+        windowLabel = '周额度';
+      } else if (win === 'daily' || bid.indexOf('daily') !== -1) {
+        windowLabel = '日额度';
+      } else if (/^\d+[smhd]$/.test(win)) {
+        windowLabel = win + ' 额度';
+      } else {
+        var bDisp = (b && typeof b.displayName === 'string' ? b.displayName : '').trim();
+        windowLabel = bDisp || (b && b.bucketId ? String(b.bucketId) : '额度');
+      }
+      return {
+        family: family,
+        groupLabel: groupLabel,
+        windowLabel: windowLabel,
+        title: groupLabel + ' · ' + windowLabel,
+      };
+    }
 
     function ingestWeeklyQuotaSummary(res) {
       var groups = (res && res.response && Array.isArray(res.response.groups))
@@ -268,6 +448,8 @@
 
       var nextByBase = {};
       var nextByFamily = {};
+      var nextAllBuckets = [];
+      var nextGeminiWeeklyRaw = null;
       var foundAny = false;
 
       for (var i = 0; i < groups.length; i++) {
@@ -276,12 +458,28 @@
         var weeklyBucket = null;
         for (var j = 0; j < grp.buckets.length; j++) {
           var b = grp.buckets[j];
-          if (!b) continue;
+          if (!b || b.disabled) continue;
+          var bFrac = readBucketFraction(b);
+          if (bFrac !== null) {
+            var labels = formatQuotaBucketLabels(grp, b);
+            nextAllBuckets.push({
+              id: b.bucketId || (i + '-' + j),
+              groupIndex: i,
+              family: labels.family,
+              groupLabel: labels.groupLabel,
+              windowLabel: labels.windowLabel,
+              title: labels.title,
+              percent: Math.max(0, Math.min(100, Math.round(bFrac * 100))),
+              fraction: bFrac,
+              resetTimeMs: readResetMs(b.resetTime),
+              description: typeof b.description === 'string' ? b.description : '',
+            });
+            foundAny = true;
+          }
           var win = typeof b.window === 'string' ? b.window.trim().toLowerCase() : '';
           var bid = typeof b.bucketId === 'string' ? b.bucketId.trim().toLowerCase() : '';
-          if (win === 'weekly' || bid.indexOf('weekly') !== -1) {
+          if (!weeklyBucket && (win === 'weekly' || bid.indexOf('weekly') !== -1)) {
             weeklyBucket = b;
-            break;
           }
         }
         if (!weeklyBucket) continue;
@@ -300,6 +498,15 @@
         var bId = (weeklyBucket.bucketId || '').toLowerCase();
         if (gName.indexOf('gemini') !== -1 || bId.indexOf('gemini') !== -1) {
           nextByFamily.gemini = info;
+          if (!nextGeminiWeeklyRaw) {
+            nextGeminiWeeklyRaw = {
+              remainingFraction: frac,
+              resetTimeMs: info.resetTimeMs,
+              bucketId: typeof weeklyBucket.bucketId === 'string' ? weeklyBucket.bucketId : '',
+              disabled: Boolean(weeklyBucket.disabled),
+              ts: Date.now(),
+            };
+          }
         }
         if (gName.indexOf('claude') !== -1 || gName.indexOf('gpt') !== -1 || bId.indexOf('3p') !== -1) {
           nextByFamily['3p'] = info;
@@ -321,7 +528,14 @@
       if (!foundAny) return false;
       weeklyQuotaStore.byModelBase = nextByBase;
       weeklyQuotaStore.byFamily = nextByFamily;
+      weeklyQuotaStore.allBuckets = nextAllBuckets;
+      weeklyQuotaStore.geminiWeeklyRaw = nextGeminiWeeklyRaw;
       weeklyQuotaStore.version += 1;
+      if (nextGeminiWeeklyRaw) {
+        equivUpState.quota = nextGeminiWeeklyRaw;
+        equivUpState.quotaSeq += 1;
+        publishEquivUp();
+      }
       return true;
     }
 
@@ -369,6 +583,33 @@
             if (prop === '__agyPeriodicQuotaWrapped') return true;
             var orig = Reflect.get(target, prop, target);
             if (typeof orig !== 'function') return orig;
+            if (prop === 'getUserStatus') {
+              return function () {
+                var p = Reflect.apply(orig, target, arguments);
+                Promise.resolve(p).then(function (res) {
+                  var us = res && res.userStatus;
+                  var email = us && typeof us.email === 'string' ? us.email.trim() : '';
+                  var tierInfo = classifyTierFromUserStatus(us);
+                  equivUpState.user = {
+                    email: email,
+                    tier: tierInfo.tier,
+                    tierName: tierInfo.tierName,
+                    ts: Date.now(),
+                  };
+                  equivUpState.userSeq += 1;
+                  publishEquivUp();
+                }, function (err) {
+                  var code = err && typeof err === 'object' ? err.code : undefined;
+                  var msg = String((err && err.message) || '');
+                  if (code === 16 || /unauthenticated/i.test(msg)) {
+                    equivUpState.signOutAt = Date.now();
+                    equivUpState.signOutSeq += 1;
+                    publishEquivUp();
+                  }
+                });
+                return p;
+              };
+            }
             if (prop === 'retrieveUserQuotaSummary') {
               return function () {
                 var p = Reflect.apply(orig, target, arguments);
@@ -380,13 +621,24 @@
                 return p;
               };
             }
+            if (prop === 'streamAgentStateUpdates') {
+              return function () {
+                var res = Reflect.apply(orig, target, arguments);
+                return wrapReadOnlyAgentStream(res);
+              };
+            }
             if (prop === 'signOut' || prop === 'clearAuth' || prop === 'logout') {
               return function () {
                 var p = Reflect.apply(orig, target, arguments);
                 Promise.resolve(p).then(function () {
                   weeklyQuotaStore.byModelBase = {};
                   weeklyQuotaStore.byFamily = {};
+                  weeklyQuotaStore.allBuckets = [];
+                  weeklyQuotaStore.geminiWeeklyRaw = null;
                   weeklyQuotaStore.version += 1;
+                  equivUpState.signOutAt = Date.now();
+                  equivUpState.signOutSeq += 1;
+                  publishEquivUp();
                   scheduleScan();
                 }, function () {});
                 return p;
@@ -415,8 +667,48 @@
 
     installWeeklyQuotaTap();
 
-    function isEntrySelected(entry, selectedLabel) {
-      if (!entry || !selectedLabel) return false;
+    function isOrchestratorModelOption(opt) {
+      if (!opt || opt.isCustom) return false;
+      var mid = typeof opt.modelId === 'string' ? opt.modelId : '';
+      if (mid) {
+        return mid === 'gemini-pro-coordinator'
+          || mid === 'gemini-pro-orchestrator'
+          || mid.indexOf('gemini-pro-orchestrator-') === 0;
+      }
+      var lbl = typeof opt.label === 'string' ? opt.label.trim() : '';
+      return /^Orchestrator(?:\s*\([^)]+\))?$/i.test(lbl);
+    }
+
+    function normalizePlannerText(text) {
+      return String(text || '')
+        .toLowerCase()
+        .replace(/\bextra\s+high\b/g, 'xhigh')
+        .replace(/\bextra\b/g, 'xhigh')
+        .replace(/[()]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function readNativeOrchestratorPlannerHint(panel) {
+      if (!panel || typeof panel.querySelector !== 'function') return '';
+      var node = panel.querySelector('[data-testid="model-selector-orchestrator-model"]');
+      if (!node) return '';
+      return (node.textContent || '').trim();
+    }
+
+    function isEntrySelected(entry, selectedLabel, activeOrchPlannerVal, isOrchSelected) {
+      if (!entry) return false;
+      if (entry.isOrchestratorPlannerEntry) {
+        if (!isOrchSelected || !activeOrchPlannerVal) return false;
+        if (entry.defaultOption && entry.defaultOption.value === activeOrchPlannerVal) return true;
+        if (entry.efforts && entry.efforts.length) {
+          for (var oi = 0; oi < entry.efforts.length; oi++) {
+            if (entry.efforts[oi].option.value === activeOrchPlannerVal) return true;
+          }
+        }
+        return false;
+      }
+      if (!selectedLabel) return false;
       if (entry.defaultOption && entry.defaultOption.label === selectedLabel) return true;
       if (entry.efforts && entry.efforts.length) {
         for (var i = 0; i < entry.efforts.length; i++) {
@@ -426,28 +718,131 @@
       return false;
     }
 
-    function pickDefaultOption(entry, selectedLabel) {
+    function pickOptionByEffort(options, preferredEffort, fallbackMode) {
+      if (!Array.isArray(options) || !options.length) return null;
+      if (preferredEffort) {
+        for (var i = 0; i < options.length; i++) {
+          if (parseModelLabel(options[i].label, false).effort === preferredEffort) {
+            return options[i];
+          }
+        }
+        var targetRank = EFFORT_ORDER.indexOf(preferredEffort);
+        if (targetRank >= 0) {
+          var bestLower = null;
+          var bestLowerRank = -1;
+          var bestHigher = null;
+          var bestHigherRank = Infinity;
+          for (var j = 0; j < options.length; j++) {
+            var rank = EFFORT_ORDER.indexOf(parseModelLabel(options[j].label, false).effort);
+            if (rank < 0) continue;
+            if (rank < targetRank && rank > bestLowerRank) {
+              bestLower = options[j];
+              bestLowerRank = rank;
+            } else if (rank > targetRank && rank < bestHigherRank) {
+              bestHigher = options[j];
+              bestHigherRank = rank;
+            }
+          }
+          if (bestLower) return bestLower;
+          if (bestHigher) return bestHigher;
+        }
+      }
+      if (fallbackMode === 'highest') {
+        var best = options[0];
+        var bestRank = EFFORT_ORDER.indexOf(parseModelLabel(best.label, false).effort);
+        for (var m = 1; m < options.length; m++) {
+          var r = EFFORT_ORDER.indexOf(parseModelLabel(options[m].label, false).effort);
+          if (r > bestRank) {
+            best = options[m];
+            bestRank = r;
+          }
+        }
+        return best;
+      }
+      for (var k = 0; k < options.length; k++) {
+        if (parseModelLabel(options[k].label, false).effort === 'medium') return options[k];
+      }
+      return options[0];
+    }
+
+    function getCurrentEffort(cat) {
+      if (cat && cat.isOrchestratorSelected && cat.activeOrchestratorPlanner && cat.activeOrchestratorPlanner.label) {
+        return parseModelLabel(cat.activeOrchestratorPlanner.label, false).effort;
+      }
+      if (cat && cat.selectedLabel) {
+        return parseModelLabel(cat.selectedLabel, false).effort;
+      }
+      return null;
+    }
+
+    function pickOrchestratorPlannerOption(plannerOptions, currentSelectedLabel, activePlannerOption, isOrchestratorSelected) {
+      if (!Array.isArray(plannerOptions) || !plannerOptions.length) return null;
+      if (isOrchestratorSelected && activePlannerOption) {
+        for (var i = 0; i < plannerOptions.length; i++) {
+          if (plannerOptions[i].value === activePlannerOption.value) return plannerOptions[i];
+        }
+      }
+      var preferredEffort = null;
+      if (isOrchestratorSelected && activePlannerOption && activePlannerOption.label) {
+        preferredEffort = parseModelLabel(activePlannerOption.label, false).effort;
+      } else if (currentSelectedLabel) {
+        preferredEffort = parseModelLabel(currentSelectedLabel, false).effort;
+      }
+      return pickOptionByEffort(plannerOptions, preferredEffort, 'highest');
+    }
+
+    function pickDefaultOption(entry, selectedLabel, preferredEffortOverride) {
       if (!entry) return null;
       if (entry.efforts && entry.efforts.length) {
         if (selectedLabel) {
           for (var i = 0; i < entry.efforts.length; i++) {
             if (entry.efforts[i].option.label === selectedLabel) return entry.efforts[i].option;
           }
-          // 切换新元素时优先沿用当前思考等级（如 Neon High -> Hydrogen High），没有再回退 Medium
-          var curParsed = parseModelLabel(selectedLabel, false);
-          if (curParsed.effort && entry.effortMap && entry.effortMap[curParsed.effort]) {
-            return entry.effortMap[curParsed.effort].option;
-          }
         }
+        // 切换新元素时优先沿用当前思考等级（无精确匹配则就近降一档，如 XHigh -> High，再兜底 Medium）
+        var preferredEffort = preferredEffortOverride || (selectedLabel ? parseModelLabel(selectedLabel, false).effort : null);
+        var effortOpts = [];
         for (var j = 0; j < entry.efforts.length; j++) {
-          if (entry.efforts[j].effort === 'medium') return entry.efforts[j].option;
+          effortOpts.push(entry.efforts[j].option);
         }
-        return entry.efforts[0].option;
+        return pickOptionByEffort(effortOpts, preferredEffort, 'medium');
       }
       return entry.defaultOption || null;
     }
 
-    function buildCatalog(ctrl, selectedLabelOverride) {
+    function resolveActiveOrchestratorPlanner(planners, ctrl, plannerOverrideValue, panel) {
+      if (!Array.isArray(planners) || !planners.length) return null;
+      var overrideVal = typeof plannerOverrideValue === 'number' && plannerOverrideValue > 0 ? plannerOverrideValue : 0;
+      if (overrideVal) {
+        for (var i = 0; i < planners.length; i++) {
+          if (planners[i].value === overrideVal) return planners[i];
+        }
+      }
+      var ctrlVal = ctrl && ctrl.orchestratorPick && typeof ctrl.orchestratorPick.model === 'number'
+        ? ctrl.orchestratorPick.model
+        : 0;
+      if (ctrlVal > 0) {
+        for (var j = 0; j < planners.length; j++) {
+          if (planners[j].value === ctrlVal) return planners[j];
+        }
+      }
+      // 当 orchestratorPick.model === 0 (UNSPECIFIED) 时，优先读取原生 DOM 显示的默认 planner（含用户全局设置）
+      var domHint = normalizePlannerText(readNativeOrchestratorPlannerHint(panel));
+      if (domHint) {
+        for (var k = 0; k < planners.length; k++) {
+          if (normalizePlannerText(planners[k].label) === domHint) return planners[k];
+        }
+      }
+      var defPlanner = ctrl && ctrl.orchestratorDefaultPlanner;
+      if (defPlanner && typeof defPlanner.value === 'number') {
+        for (var m = 0; m < planners.length; m++) {
+          if (planners[m].value === defPlanner.value) return planners[m];
+        }
+      }
+      return defPlanner || planners[0];
+    }
+
+    function buildCatalog(ctrl, selectedLabelOverride, orchestratorPlannerOverride, panel) {
       var modelOptions = Array.isArray(ctrl && ctrl.modelOptions) ? ctrl.modelOptions : [];
       var customModels = Array.isArray(ctrl && ctrl.customModels) ? ctrl.customModels : [];
       var selectedModel = (ctrl && ctrl.selectedModel) || null;
@@ -490,11 +885,63 @@
         }
       }
 
+      var primaryOrchestratorOption = null;
+      var legacyOrchOptBySymbol = {};
+      var selectedRawOpt = null;
+      for (var oi2 = 0; oi2 < orderedRaw.length; oi2++) {
+        var ro = orderedRaw[oi2];
+        if (!ro || !ro.label) continue;
+        if (ro.label === selectedLabel) selectedRawOpt = ro;
+        if (ro.disabled) continue;
+        if (isOrchestratorModelOption(ro)) {
+          if (!primaryOrchestratorOption) primaryOrchestratorOption = ro;
+          var legacyEl = matchOrchestratorElement(ro.label);
+          if (legacyEl && !legacyOrchOptBySymbol[legacyEl.symbol]) {
+            legacyOrchOptBySymbol[legacyEl.symbol] = ro;
+          }
+        }
+      }
+
+      var hasOrchPick = !!(ctrl && ctrl.orchestratorPick && typeof ctrl.orchestratorPick.select === 'function');
+      var explicitPlanners = Array.isArray(ctrl && ctrl.orchestratorPlanners)
+        ? ctrl.orchestratorPlanners.filter(function (o) { return !!(o && !o.disabled && o.label); })
+        : null;
+      var rawPlanners = explicitPlanners;
+      // 兜底：若仅拿到了外层 J7c 的 orchestratorPick 而未拿到内层 Provider 的 orchestratorPlanners，则按已开放的 Orchestrator(元素) 推断
+      if (rawPlanners === null && hasOrchPick && primaryOrchestratorOption) {
+        var inferredPlanners = [];
+        for (var ip = 0; ip < orderedRaw.length; ip++) {
+          var candOpt = orderedRaw[ip];
+          if (!candOpt || candOpt.disabled || candOpt.isCustom || isOrchestratorModelOption(candOpt)) continue;
+          var candEl = matchGemini4Element(parseModelLabel(candOpt.label, false).base);
+          if (candEl && legacyOrchOptBySymbol[candEl.symbol]) {
+            inferredPlanners.push(candOpt);
+          }
+        }
+        if (inferredPlanners.length) rawPlanners = inferredPlanners;
+      }
+
+      var unifiedOrchestratorMode = !!(
+        hasOrchPick
+        && primaryOrchestratorOption
+        && Array.isArray(rawPlanners)
+        && rawPlanners.length > 0
+      );
+      var isOrchestratorSelected = selectedRawOpt
+        ? isOrchestratorModelOption(selectedRawOpt)
+        : (selectedLabel ? /^Orchestrator(?:\s*\([^)]+\))?$/i.test(selectedLabel.trim()) : false);
+      var activeOrchestratorPlanner = unifiedOrchestratorMode
+        ? resolveActiveOrchestratorPlanner(rawPlanners, ctrl, orchestratorPlannerOverride, panel)
+        : null;
+      var activeOrchPlannerVal = activeOrchestratorPlanner ? activeOrchestratorPlanner.value : 0;
+
       var groupMap = {};
       var groupOrder = [];
       for (var i = 0; i < orderedRaw.length; i++) {
         var opt = orderedRaw[i];
         if (!opt || !opt.label || opt.disabled) continue;
+        // 统一 Planner 模式下，原生 Orchestrator (Neon/Carbon/Argon) 只是模式入口，由下方 planner 分组替代展示
+        if (unifiedOrchestratorMode && isOrchestratorModelOption(opt)) continue;
         var parsed = parseModelLabel(opt.label, !!opt.isCustom);
         var key = (opt.isCustom ? 'custom::' : 'std::') + parsed.base;
         var entry = groupMap[key];
@@ -511,6 +958,9 @@
             weeklyQuota: lookupWeeklyQuota(parsed.base, !!opt.isCustom),
             element: null,
             orchestratorOption: null,
+            orchestratorPlanners: null,
+            isOrchestratorPlannerEntry: false,
+            orchestratorBaseOption: null,
             category: null,
           };
           groupMap[key] = entry;
@@ -570,10 +1020,93 @@
         }
       }
 
-      for (var q = 0; q < periodicEntries.length; q++) {
-        var pe = periodicEntries[q];
-        if (pe.element && orchestratorBySymbol[pe.element.symbol]) {
-          pe.orchestratorOption = orchestratorBySymbol[pe.element.symbol].defaultOption;
+      if (unifiedOrchestratorMode) {
+        // 将 orchestratorPlanners 按基础模型分组，既挂到周期表对应元素的 Orchestrator 按钮，也生成 Orchestrator 分类条目
+        var plannerGroupMap = {};
+        var plannerGroupOrder = [];
+        var plannersBySymbol = {};
+        for (var pi = 0; pi < rawPlanners.length; pi++) {
+          var popt = rawPlanners[pi];
+          var pparsed = parseModelLabel(popt.label, false);
+          var pkey = 'orch::' + pparsed.base;
+          var pElem = matchGemini4Element(pparsed.base);
+          var baseOrchOpt = (pElem && legacyOrchOptBySymbol[pElem.symbol]) || primaryOrchestratorOption;
+          var pEntry = plannerGroupMap[pkey];
+          if (!pEntry) {
+            pEntry = {
+              key: pkey,
+              base: 'Orchestrator · ' + pparsed.base,
+              plannerBase: pparsed.base,
+              isCustom: false,
+              isOrchestratorPlannerEntry: true,
+              orchestratorBaseOption: baseOrchOpt,
+              plannerElement: pElem,
+              efforts: [],
+              effortMap: {},
+              plannerOptions: [],
+              defaultOption: popt,
+              tagTitle: 'New',
+              tagDescription: (baseOrchOpt && baseOrchOpt.tagDescription) || 'Offloads routine steps to a faster executor. Same quality, fewer tokens used.',
+              weeklyQuota: lookupWeeklyQuota(pparsed.base, false),
+              element: null,
+              orchestratorOption: null,
+              orchestratorPlanners: null,
+              category: { id: 'orchestrator', label: 'Orchestrator' },
+            };
+            plannerGroupMap[pkey] = pEntry;
+            plannerGroupOrder.push(pEntry);
+          }
+          pEntry.plannerOptions.push(popt);
+          if (pparsed.effort) {
+            if (!pEntry.effortMap[pparsed.effort]) {
+              var pef = {
+                effort: pparsed.effort,
+                label: EFFORT_LABELS[pparsed.effort] || pparsed.effort,
+                option: popt,
+              };
+              pEntry.effortMap[pparsed.effort] = pef;
+              pEntry.efforts.push(pef);
+            }
+          } else {
+            pEntry.defaultOption = popt;
+          }
+          if (pElem) {
+            if (!plannersBySymbol[pElem.symbol]) plannersBySymbol[pElem.symbol] = [];
+            plannersBySymbol[pElem.symbol].push(popt);
+          }
+        }
+
+        for (var pg = 0; pg < plannerGroupOrder.length; pg++) {
+          var pent = plannerGroupOrder[pg];
+          if (pent.efforts.length) {
+            pent.efforts.sort(function (a, b) {
+              return EFFORT_ORDER.indexOf(a.effort) - EFFORT_ORDER.indexOf(b.effort);
+            });
+            pent.defaultOption = pickOrchestratorPlannerOption(pent.plannerOptions, selectedLabel, activeOrchestratorPlanner, isOrchestratorSelected);
+          }
+          otherEntries.push(pent);
+          groupOrder.push(pent);
+        }
+
+        for (var q1 = 0; q1 < periodicEntries.length; q1++) {
+          var pe1 = periodicEntries[q1];
+          var sym1 = pe1.element && pe1.element.symbol;
+          var symPlanners = sym1 ? plannersBySymbol[sym1] : null;
+          if (symPlanners && symPlanners.length) {
+            symPlanners.sort(function (a, b) {
+              return EFFORT_ORDER.indexOf(parseModelLabel(a.label, false).effort)
+                - EFFORT_ORDER.indexOf(parseModelLabel(b.label, false).effort);
+            });
+            pe1.orchestratorPlanners = symPlanners;
+            pe1.orchestratorOption = legacyOrchOptBySymbol[sym1] || primaryOrchestratorOption;
+          }
+        }
+      } else {
+        for (var q = 0; q < periodicEntries.length; q++) {
+          var pe = periodicEntries[q];
+          if (pe.element && orchestratorBySymbol[pe.element.symbol]) {
+            pe.orchestratorOption = orchestratorBySymbol[pe.element.symbol].defaultOption;
+          }
         }
       }
 
@@ -591,7 +1124,9 @@
           };
         }
         catMap[cid].entries.push(oe);
-        if (isEntrySelected(oe, selectedLabel)) catMap[cid].hasSelected = true;
+        if (isEntrySelected(oe, selectedLabel, activeOrchPlannerVal, isOrchestratorSelected)) {
+          catMap[cid].hasSelected = true;
+        }
       }
       var otherCategories = [];
       for (var cp = 0; cp < catPriority.length; cp++) {
@@ -601,19 +1136,31 @@
       var selectedPeriodic = null;
       var selectedOther = null;
       for (var s1 = 0; s1 < periodicEntries.length; s1++) {
-        if (isEntrySelected(periodicEntries[s1], selectedLabel)) {
+        if (isEntrySelected(periodicEntries[s1], selectedLabel, activeOrchPlannerVal, isOrchestratorSelected)) {
           selectedPeriodic = periodicEntries[s1];
           break;
         }
       }
       if (!selectedPeriodic) {
         for (var s2 = 0; s2 < otherEntries.length; s2++) {
-          if (isEntrySelected(otherEntries[s2], selectedLabel)) {
+          if (isEntrySelected(otherEntries[s2], selectedLabel, activeOrchPlannerVal, isOrchestratorSelected)) {
             selectedOther = otherEntries[s2];
             break;
           }
         }
       }
+
+      var activeOrchestratorElement = null;
+      if (isOrchestratorSelected) {
+        if (unifiedOrchestratorMode && activeOrchestratorPlanner) {
+          activeOrchestratorElement = matchGemini4Element(parseModelLabel(activeOrchestratorPlanner.label, false).base);
+        } else {
+          activeOrchestratorElement = matchOrchestratorElement(selectedLabel);
+        }
+      }
+      var selectedDisplayLabel = (unifiedOrchestratorMode && isOrchestratorSelected && activeOrchestratorPlanner)
+        ? ('Orchestrator · ' + activeOrchestratorPlanner.label)
+        : selectedLabel;
 
       return {
         allEntries: groupOrder,
@@ -622,9 +1169,14 @@
         otherEntries: otherEntries,
         otherCategories: otherCategories,
         selectedLabel: selectedLabel,
+        selectedDisplayLabel: selectedDisplayLabel,
         selectedPeriodic: selectedPeriodic,
         selectedOther: selectedOther,
         releasedCount: periodicEntries.length,
+        unifiedOrchestratorMode: unifiedOrchestratorMode,
+        isOrchestratorSelected: isOrchestratorSelected,
+        activeOrchestratorPlanner: activeOrchestratorPlanner,
+        activeOrchestratorElement: activeOrchestratorElement,
       };
     }
 
@@ -652,36 +1204,67 @@
       var fiber = getFiberFromElement(elNode);
       var bestOuter = null;
       var bestAny = null;
+      var providerVal = null;
       var step = 0;
       while (fiber && step < 300) {
         var props = fiber.memoizedProps || fiber.pendingProps;
         if (isControllerProps(props)) {
           bestAny = props;
-          // 最外层 n0c 同时持有 setIsOpen 和 placement，它的 setSelectedModel 是原始版本，不会在选中后强制关闭菜单
+          // 最外层 J7c 同时持有 setIsOpen 和 placement，它的 setSelectedModel 是原始版本，不会在选中后强制关闭菜单
           if (typeof props.setIsOpen === 'function') {
             bestOuter = props;
           }
+          if (!providerVal && Array.isArray(props.orchestratorPlanners)) {
+            providerVal = props;
+          }
         } else if (props && props.value && isControllerProps(props.value)) {
           if (!bestAny) bestAny = props.value;
+          // 内层 ModelSelectorProvider (v7c.Provider) 持有完整的 orchestratorPlanners 与 orchestratorDefaultPlanner
+          if (!providerVal && (Array.isArray(props.value.orchestratorPlanners) || props.value.orchestratorPick)) {
+            providerVal = props.value;
+          }
         }
         fiber = fiber['return'];
         step++;
       }
-      return bestOuter || bestAny;
+      var baseCtrl = bestOuter || bestAny;
+      if (!baseCtrl) return null;
+      if (providerVal && providerVal !== baseCtrl) {
+        return Object.assign({}, baseCtrl, {
+          orchestratorPlanners: Array.isArray(providerVal.orchestratorPlanners)
+            ? providerVal.orchestratorPlanners
+            : baseCtrl.orchestratorPlanners,
+          orchestratorDefaultPlanner: providerVal.orchestratorDefaultPlanner !== undefined
+            ? providerVal.orchestratorDefaultPlanner
+            : baseCtrl.orchestratorDefaultPlanner,
+          orchestratorPick: baseCtrl.orchestratorPick || providerVal.orchestratorPick,
+        });
+      }
+      return baseCtrl;
     }
 
-    function computeCatalogSignature(ctrl, selectedLabelOverride) {
+    function computeCatalogSignature(ctrl, selectedLabelOverride, orchestratorPlannerOverride, panel) {
       var sel = selectedLabelOverride || (ctrl && ctrl.selectedModel && ctrl.selectedModel.label) || '';
       var ctxSel = (ctrl && ctrl.contextWindow && ctrl.contextWindow.selected) || '';
       var opts = Array.isArray(ctrl && ctrl.modelOptions) ? ctrl.modelOptions : [];
       var customs = Array.isArray(ctrl && ctrl.customModels) ? ctrl.customModels : [];
+      var orchPlanners = Array.isArray(ctrl && ctrl.orchestratorPlanners) ? ctrl.orchestratorPlanners : [];
+      var orchPickVal = (typeof orchestratorPlannerOverride === 'number' && orchestratorPlannerOverride > 0)
+        ? orchestratorPlannerOverride
+        : ((ctrl && ctrl.orchestratorPick && typeof ctrl.orchestratorPick.model === 'number') ? ctrl.orchestratorPick.model : 0);
+      var orchDefVal = (ctrl && ctrl.orchestratorDefaultPlanner && typeof ctrl.orchestratorDefaultPlanner.value === 'number')
+        ? ctrl.orchestratorDefaultPlanner.value
+        : 0;
+      var domHint = readNativeOrchestratorPlannerHint(panel);
       var fbGem = readBridgeGeminiWeeklyFallback();
       var parts = [
         sel,
         ctxSel,
         String(opts.length),
         String(customs.length),
+        'op:' + String(orchPickVal) + ':' + String(orchDefVal) + ':' + String(orchPlanners.length) + ':' + domHint,
         'wq:' + String(weeklyQuotaStore.version) + ':' + (fbGem ? String(fbGem.percent) : ''),
+        'eq:' + String(equivCostStore.version),
       ];
       for (var i = 0; i < opts.length; i++) {
         var o = opts[i];
@@ -805,8 +1388,37 @@
         '  --pm-accent-soft: rgba(96, 165, 250, 0.18);',
         '}',
         '[' + INLINE_ATTR + '="1"] * { box-sizing: border-box; }',
-        /* 顶部工具条：左侧二级分类胶囊 + 右侧搜索与原版切换 */
-        '.agy-pm-topbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }',
+        /* 顶部工具条：左侧（分类胶囊 + 搜索工具），右侧（4 项额度饼状图） */
+        '.agy-pm-topbar { position: relative; z-index: 10; display: flex; align-items: stretch; justify-content: space-between; gap: 10px; }',
+        '.agy-pm-topbar-left { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-width: 0; }',
+        '.agy-pm-quota-pies-slot { display: flex; align-items: stretch; flex-shrink: 0; }',
+        '.agy-pm-quota-pies {',
+        '  display: flex; align-items: center; gap: 7px; padding: 5px 9px;',
+        '  border-radius: 9px; border: 1px solid var(--pm-border); background: var(--pm-panel-bg);',
+        '}',
+        '.agy-pm-quota-pie {',
+        '  position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;',
+        '  gap: 2px; min-width: 30px; padding: 2px 3px; border-radius: 6px; cursor: default; outline: none;',
+        '  transition: background 110ms ease;',
+        '}',
+        '.agy-pm-quota-pie:hover, .agy-pm-quota-pie:focus-visible { background: var(--pm-surface-hover); }',
+        '.agy-pm-quota-pie-svg { width: 26px; height: 26px; display: block; }',
+        '.agy-pm-quota-pie-pct { font-size: 10px; line-height: 1; font-weight: 600; color: var(--pm-text-muted); font-variant-numeric: tabular-nums; }',
+        '.agy-pm-quota-pie-sep { width: 1px; height: 28px; background: var(--pm-border); flex-shrink: 0; }',
+        '.agy-pm-quota-tip {',
+        '  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; pointer-events: none;',
+        '  opacity: 0; visibility: hidden; transform: translateY(-2px);',
+        '  transition: opacity 100ms ease, transform 100ms ease;',
+        '  min-width: 148px; padding: 6px 8px; border-radius: 7px;',
+        '  border: 1px solid var(--pm-border-strong); background: #ffffff; color: var(--pm-text);',
+        '  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22); white-space: nowrap;',
+        '}',
+        '[' + INLINE_ATTR + '="1"][data-theme="dark"] .agy-pm-quota-tip { background: #1f232b; }',
+        '.agy-pm-quota-pie:hover .agy-pm-quota-tip, .agy-pm-quota-pie:focus-visible .agy-pm-quota-tip {',
+        '  opacity: 1; visibility: visible; transform: translateY(0);',
+        '}',
+        '.agy-pm-quota-tip-title { font-size: 11.5px; font-weight: 600; color: var(--pm-text); }',
+        '.agy-pm-quota-tip-meta { font-size: 10.5px; color: var(--pm-text-muted); margin-top: 2px; }',
         '.agy-pm-tabs { display: flex; align-items: center; gap: 5px; overflow-x: auto; scrollbar-width: none; flex: 1 1 auto; min-width: 0; }',
         '.agy-pm-tabs::-webkit-scrollbar { display: none; }',
         '.agy-pm-tab {',
@@ -823,14 +1435,13 @@
         '  border-radius: 4px; background: var(--pm-badge-bg); color: var(--pm-badge-text); font-size: 11px; font-weight: 700; line-height: 1;',
         '}',
         '.agy-pm-tab-count { font-size: 10.5px; color: var(--pm-text-muted); background: var(--pm-chip-bg); padding: 0 5px; border-radius: 999px; }',
-        '.agy-pm-tab-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--pm-accent); }',
-        '.agy-pm-tools { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }',
+        '.agy-pm-tools { display: flex; align-items: center; gap: 5px; flex: 1 1 auto; min-width: 0; }',
         '.agy-pm-search-box {',
-        '  display: flex; align-items: center; gap: 5px; height: 27px; width: 158px; padding: 0 8px;',
+        '  display: flex; align-items: center; gap: 5px; height: 27px; width: 146px; padding: 0 8px; flex-shrink: 0;',
         '  border-radius: 7px; border: 1px solid var(--pm-border); background: var(--pm-surface);',
         '  transition: border-color 110ms ease, width 140ms ease;',
         '}',
-        '.agy-pm-search-box:focus-within { border-color: var(--pm-accent); width: 186px; }',
+        '.agy-pm-search-box:focus-within { border-color: var(--pm-accent); width: 170px; }',
         '.agy-pm-search-icon { color: var(--pm-text-faint); font-size: 12px; line-height: 1; }',
         '.agy-pm-search-input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--pm-text); font-size: 12px; }',
         '.agy-pm-search-input::placeholder { color: var(--pm-text-faint); }',
@@ -839,9 +1450,34 @@
         '.agy-pm-tool-btn {',
         '  height: 27px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--pm-border);',
         '  background: transparent; color: var(--pm-text-muted); font-size: 11.5px; cursor: pointer;',
-        '  transition: all 110ms ease; white-space: nowrap;',
+        '  transition: all 110ms ease; white-space: nowrap; flex-shrink: 0;',
         '}',
         '.agy-pm-tool-btn:hover { background: var(--pm-surface-hover); color: var(--pm-text); border-color: var(--pm-border-strong); }',
+        '.agy-pm-equiv-cost-slot { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; }',
+        '.agy-pm-equiv-cost {',
+        '  position: relative; display: flex; align-items: center; justify-content: flex-start;',
+        '  flex: 1 1 auto; min-width: 0; height: 27px; padding: 0 9px; border-radius: 7px;',
+        '  border: 1px solid var(--pm-border); background: var(--pm-panel-bg);',
+        '  color: var(--pm-text-muted); font-size: 11.5px; line-height: 25px; cursor: default; outline: none;',
+        '  transition: border-color 110ms ease, background 110ms ease;',
+        '}',
+        '.agy-pm-equiv-cost:hover, .agy-pm-equiv-cost:focus-visible { border-color: var(--pm-border-strong); background: var(--pm-surface-hover); }',
+        '.agy-pm-equiv-cost-text { display: block; width: 100%; height: 25px; line-height: 25px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }',
+        '.agy-pm-equiv-cost-val { color: var(--pm-text); font-weight: 600; }',
+        '.agy-pm-equiv-tip {',
+        '  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; pointer-events: none;',
+        '  opacity: 0; visibility: hidden; transform: translateY(-2px);',
+        '  transition: opacity 100ms ease, transform 100ms ease;',
+        '  min-width: 240px; max-width: 340px; padding: 7px 9px; border-radius: 7px;',
+        '  border: 1px solid var(--pm-border-strong); background: #ffffff; color: var(--pm-text);',
+        '  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22); white-space: normal; line-height: 1.45;',
+        '}',
+        '[' + INLINE_ATTR + '="1"][data-theme="dark"] .agy-pm-equiv-tip { background: #1f232b; }',
+        '.agy-pm-equiv-cost:hover .agy-pm-equiv-tip, .agy-pm-equiv-cost:focus-visible .agy-pm-equiv-tip {',
+        '  opacity: 1; visibility: visible; transform: translateY(0);',
+        '}',
+        '.agy-pm-equiv-tip-title { font-size: 11.5px; font-weight: 600; color: var(--pm-text); margin-bottom: 3px; }',
+        '.agy-pm-equiv-tip-line { font-size: 10.5px; color: var(--pm-text-muted); margin-top: 2px; word-break: break-word; }',
         /* 原版视图顶部切回周期表的小条 */
         '[' + NATIVE_BAR_ATTR + '="1"] {',
         '  display: flex; align-items: center; justify-content: flex-end; padding: 2px 4px 4px 4px;',
@@ -884,8 +1520,7 @@
         '  transition: transform 100ms ease, box-shadow 100ms ease, border-color 100ms ease;',
         '  user-select: none; outline: none;',
         '}',
-        '.agy-pm-cell[data-supported="false"] { cursor: not-allowed; opacity: 0.78; }',
-        '.agy-pm-cell[data-supported="false"]:hover { opacity: 0.96; border-color: var(--pm-border-strong); }',
+        '.agy-pm-cell[data-supported="false"] { cursor: default; opacity: 0.72; pointer-events: none; }',
         '.agy-pm-cell[data-supported="true"] { cursor: pointer; z-index: 3; }',
         '.agy-pm-cell[data-supported="true"]:hover { transform: translateY(-1.5px) scale(1.05); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25); }',
         '.agy-pm-cell.is-selected { box-shadow: 0 0 0 2px var(--pm-accent), 0 2px 10px rgba(37, 99, 235, 0.3); z-index: 4; }',
@@ -952,6 +1587,25 @@
         '.agy-pm-effort-btn:hover { border-color: var(--pm-accent); color: var(--pm-accent); background: var(--pm-accent-soft); }',
         '.agy-pm-effort-btn.is-active { background: var(--pm-accent); border-color: var(--pm-accent); color: #ffffff; }',
         '.agy-pm-effort-btn.is-orch { border-style: dashed; }',
+        '.agy-pm-detail-sep { width: 1px; height: 16px; background: var(--pm-border); margin: 0 2px; flex-shrink: 0; }',
+        '.agy-pm-orch-toggle {',
+        '  display: inline-flex; align-items: center; gap: 6px; height: 25px; padding: 0 8px;',
+        '  border-radius: 999px; border: 1px solid var(--pm-border);',
+        '  background: var(--pm-surface); color: var(--pm-text); font-size: 11.5px; font-weight: 500;',
+        '  cursor: pointer; transition: all 100ms ease;',
+        '}',
+        '.agy-pm-orch-toggle:hover { border-color: var(--pm-accent); color: var(--pm-accent); background: var(--pm-accent-soft); }',
+        '.agy-pm-orch-toggle.is-active { background: var(--pm-accent-soft); border-color: var(--pm-accent); color: var(--pm-accent); }',
+        '.agy-pm-switch-track {',
+        '  position: relative; width: 24px; height: 14px; border-radius: 999px;',
+        '  background: var(--pm-border-strong); transition: background 120ms ease; flex-shrink: 0;',
+        '}',
+        '.agy-pm-switch-thumb {',
+        '  position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%;',
+        '  background: #ffffff; transition: transform 120ms ease; box-shadow: 0 1px 2px rgba(0,0,0,0.25);',
+        '}',
+        '.agy-pm-orch-toggle.is-active .agy-pm-switch-track { background: var(--pm-accent); }',
+        '.agy-pm-orch-toggle.is-active .agy-pm-switch-thumb { transform: translateX(10px); }',
         '.agy-pm-footer-hint {',
         '  display: flex; align-items: center; justify-content: space-between; gap: 8px;',
         '  font-size: 11px; color: var(--pm-text-muted); padding: 0 2px; flex-wrap: wrap;',
@@ -1023,6 +1677,81 @@
       return node;
     }
 
+    function svgEl(tag, attrs, children) {
+      var node = w.document.createElementNS('http://www.w3.org/2000/svg', tag);
+      if (attrs) {
+        var keys = Object.keys(attrs);
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          var v = attrs[k];
+          if (v === undefined || v === null || v === false) continue;
+          node.setAttribute(k === 'className' ? 'class' : k, String(v));
+        }
+      }
+      if (Array.isArray(children)) {
+        for (var c = 0; c < children.length; c++) {
+          if (children[c]) node.appendChild(children[c]);
+        }
+      }
+      return node;
+    }
+
+    function findNativeFooterNodesToHide(panel) {
+      var result = [];
+      if (!panel || !panel.children) return result;
+      var nativeList = findNativeListNode(panel);
+      var children = panel.children;
+      for (var i = 0; i < children.length; i++) {
+        var ch = children[i];
+        if (!ch || ch.nodeType !== 1 || ch === nativeList) continue;
+        if (ch.getAttribute(INLINE_ATTR) === '1' || ch.getAttribute(NATIVE_BAR_ATTR) === '1') continue;
+        if (
+          ch.querySelector
+          && (ch.querySelector('[data-testid="model-selector-header"]')
+            || ch.querySelector('[data-testid="model-selector-item"]'))
+        ) {
+          continue;
+        }
+        var tid = ch.getAttribute('data-testid') || '';
+        var txt = (ch.textContent || '').trim();
+        var isUsage = tid === 'native-usage-footer' || /查看用量|View\s+Usage/i.test(txt);
+        if (!isUsage) continue;
+
+        // 若容器内除了「查看用量」还混有升级提示或外部 footerExtra，仅隐藏用量行本身
+        var subEls = [];
+        for (var j = 0; j < ch.children.length; j++) {
+          if (ch.children[j] && ch.children[j].nodeType === 1) subEls.push(ch.children[j]);
+        }
+        var nonUsageSub = false;
+        var usageSubNodes = [];
+        for (var k = 0; k < subEls.length; k++) {
+          var st = (subEls[k].textContent || '').trim();
+          if (/查看用量|View\s+Usage/i.test(st)) usageSubNodes.push(subEls[k]);
+          else if (st) nonUsageSub = true;
+        }
+
+        if (subEls.length > 1 && nonUsageSub && usageSubNodes.length) {
+          for (var u = 0; u < usageSubNodes.length; u++) result.push(usageSubNodes[u]);
+        } else {
+          // 同时隐藏紧邻其上方的原生细分割线（DW）
+          for (var prevIdx = i - 1; prevIdx >= 0; prevIdx--) {
+            var prev = children[prevIdx];
+            if (!prev || prev.nodeType !== 1) continue;
+            if (prev.getAttribute(INLINE_ATTR) === '1' || prev.getAttribute(NATIVE_BAR_ATTR) === '1') continue;
+            var prevCls = typeof prev.className === 'string' ? prev.className : '';
+            var prevRole = prev.getAttribute('role') || '';
+            var prevTxt = (prev.textContent || '').trim();
+            if (prev !== nativeList && (prevRole === 'separator' || (prevCls.indexOf('h-px') !== -1 && !prevTxt))) {
+              result.push(prev);
+            }
+            break;
+          }
+          result.push(ch);
+        }
+      }
+      return result;
+    }
+
     // 每个原生 panel 对应的原地挂载实例（使用 WeakMap 随 React 卸载自动释放）
     var panelStates = typeof WeakMap === 'function' ? new WeakMap() : null;
     var activeInstance = null;
@@ -1090,14 +1819,27 @@
       }, true);
     }
 
-    function selectModelOption(inst, opt, ctxWindow) {
+    function selectModelOption(inst, opt, ctxWindow, orchestratorPlannerOpt) {
       if (!inst || !opt || !inst.ctrl || typeof inst.ctrl.setSelectedModel !== 'function') return false;
       // 重新从 panel 取最新外层控制器（避免闭包过期，确保拿到不关闭菜单的原始 setSelectedModel）
       var freshCtrl = inst.panel ? resolveControllerForPanel(inst.panel) : null;
       if (freshCtrl) inst.ctrl = freshCtrl;
 
+      var prevPlannerVal = (inst.ctrl.orchestratorPick && typeof inst.ctrl.orchestratorPick.model === 'number')
+        ? inst.ctrl.orchestratorPick.model
+        : 0;
+
       suppressFocusOutUntil = Date.now() + 220;
       try {
+        // 统一 Orchestrator Planner 模式：必须先通过 orchestratorPick.select(plannerValue) 指定规划器模型，再切到 Orchestrator 模式
+        if (
+          orchestratorPlannerOpt
+          && typeof orchestratorPlannerOpt.value === 'number'
+          && inst.ctrl.orchestratorPick
+          && typeof inst.ctrl.orchestratorPick.select === 'function'
+        ) {
+          inst.ctrl.orchestratorPick.select(orchestratorPlannerOpt.value);
+        }
         if (ctxWindow !== undefined) inst.ctrl.setSelectedModel(opt, ctxWindow);
         else inst.ctrl.setSelectedModel(opt);
       } catch (err) {
@@ -1112,9 +1854,16 @@
 
       // 保持菜单打开，立即乐观更新高亮状态，方便连续选择模型 + 思考等级
       inst.selectedOverride = opt.label;
-      inst.catalog = buildCatalog(inst.ctrl, inst.selectedOverride);
-      inst.sig = computeCatalogSignature(inst.ctrl, inst.selectedOverride);
-      var parsed = parseModelLabel(opt.label, !!opt.isCustom);
+      if (orchestratorPlannerOpt && typeof orchestratorPlannerOpt.value === 'number' && orchestratorPlannerOpt.value > 0) {
+        inst.prevOrchPlannerValue = prevPlannerVal;
+        inst.selectedOrchestratorPlannerValue = orchestratorPlannerOpt.value;
+      } else {
+        inst.prevOrchPlannerValue = 0;
+        inst.selectedOrchestratorPlannerValue = 0;
+      }
+      inst.catalog = buildCatalog(inst.ctrl, inst.selectedOverride, inst.selectedOrchestratorPlannerValue, inst.panel);
+      inst.sig = computeCatalogSignature(inst.ctrl, inst.selectedOverride, inst.selectedOrchestratorPlannerValue, inst.panel);
+      var parsed = parseModelLabel(orchestratorPlannerOpt ? orchestratorPlannerOpt.label : opt.label, !!opt.isCustom);
       var elem = !opt.isCustom ? matchGemini4Element(parsed.base) : null;
       if (elem && inst.catalog.periodicBySymbol[elem.symbol]) {
         inst.lockedSymbol = elem.symbol;
@@ -1137,6 +1886,10 @@
       }
       if (cat.selectedPeriodic) {
         return { element: cat.selectedPeriodic.element, entry: cat.selectedPeriodic };
+      }
+      if (cat.activeOrchestratorElement && cat.periodicBySymbol[cat.activeOrchestratorElement.symbol]) {
+        var activeOrchEntry = cat.periodicBySymbol[cat.activeOrchestratorElement.symbol];
+        return { element: activeOrchEntry.element, entry: activeOrchEntry };
       }
       if (cat.periodicEntries.length) {
         return { element: cat.periodicEntries[0].element, entry: cat.periodicEntries[0] };
@@ -1197,11 +1950,33 @@
         }));
       }
 
+      var symPlanners = entry.orchestratorPlanners;
+      var isUnifiedOrch = !!(entry.orchestratorOption && cat.unifiedOrchestratorMode && Array.isArray(symPlanners) && symPlanners.length);
+      var isCurOrch = false;
+      var activePlannerMatch = null;
+      if (entry.orchestratorOption) {
+        if (isUnifiedOrch) {
+          if (cat.isOrchestratorSelected && cat.activeOrchestratorPlanner) {
+            for (var opi = 0; opi < symPlanners.length; opi++) {
+              if (symPlanners[opi].value === cat.activeOrchestratorPlanner.value) {
+                isCurOrch = true;
+                activePlannerMatch = symPlanners[opi];
+                break;
+              }
+            }
+          }
+        } else {
+          isCurOrch = entry.orchestratorOption.label === cat.selectedLabel;
+        }
+      }
+
       var rightBtns = [];
       if (entry.efforts && entry.efforts.length) {
         for (var i = 0; i < entry.efforts.length; i++) {
           (function (ef) {
-            var isCur = ef.option.label === cat.selectedLabel;
+            var isCur = isCurOrch && activePlannerMatch
+              ? (ef.option.value === activePlannerMatch.value || ef.option.label === activePlannerMatch.label)
+              : (ef.option.label === cat.selectedLabel);
             rightBtns.push(el('button', {
               type: 'button',
               className: 'agy-pm-effort-btn' + (isCur ? ' is-active' : ''),
@@ -1210,6 +1985,20 @@
               text: ef.label,
               onClick: function (ev) {
                 ev.stopPropagation();
+                if (isCurOrch && isUnifiedOrch) {
+                  var matchedPlanner = null;
+                  for (var pi = 0; pi < symPlanners.length; pi++) {
+                    var sp = symPlanners[pi];
+                    if (sp.value === ef.option.value || parseModelLabel(sp.label, false).effort === ef.effort) {
+                      matchedPlanner = sp;
+                      break;
+                    }
+                  }
+                  if (matchedPlanner) {
+                    selectModelOption(inst, entry.orchestratorOption, undefined, matchedPlanner);
+                    return;
+                  }
+                }
                 selectModelOption(inst, ef.option);
               },
             }));
@@ -1230,22 +2019,63 @@
 
       if (entry.orchestratorOption) {
         (function (orchOpt) {
-          var isCurOrch = orchOpt.label === cat.selectedLabel;
+          if (rightBtns.length > 0) {
+            rightBtns.push(el('span', { className: 'agy-pm-detail-sep', 'aria-hidden': 'true' }));
+          }
+          var targetPlanner = isUnifiedOrch
+            ? pickOrchestratorPlannerOption(symPlanners, cat.selectedLabel, cat.activeOrchestratorPlanner, cat.isOrchestratorSelected)
+            : null;
+          var orchTitle = isCurOrch
+            ? '关闭 Orchestrator（保留当前思考等级）'
+            : (isUnifiedOrch && targetPlanner
+              ? ('开启 Orchestrator（规划器：' + targetPlanner.label + '）')
+              : (orchOpt.tagDescription || orchOpt.label));
           rightBtns.push(el('button', {
             type: 'button',
-            className: 'agy-pm-effort-btn is-orch' + (isCurOrch ? ' is-active' : ''),
-            title: orchOpt.tagDescription || orchOpt.label,
-            text: 'Orchestrator',
+            className: 'agy-pm-orch-toggle' + (isCurOrch ? ' is-active' : ''),
+            role: 'switch',
+            'aria-checked': isCurOrch ? 'true' : 'false',
+            'data-testid': 'agy-pm-detail-orchestrator',
+            title: orchTitle,
             onClick: function (ev) {
               ev.stopPropagation();
-              selectModelOption(inst, orchOpt);
+              if (isCurOrch) {
+                var normalOpt = null;
+                if (activePlannerMatch) {
+                  if (entry.efforts && entry.efforts.length) {
+                    for (var ni = 0; ni < entry.efforts.length; ni++) {
+                      var neo = entry.efforts[ni].option;
+                      if (neo.value === activePlannerMatch.value || neo.label === activePlannerMatch.label) {
+                        normalOpt = neo;
+                        break;
+                      }
+                    }
+                  }
+                  if (!normalOpt) normalOpt = pickDefaultOption(entry, activePlannerMatch.label);
+                  if (!normalOpt) normalOpt = activePlannerMatch;
+                } else {
+                  normalOpt = pickDefaultOption(entry, cat.selectedLabel);
+                }
+                if (normalOpt) selectModelOption(inst, normalOpt);
+                return;
+              }
+              if (isUnifiedOrch && targetPlanner) {
+                selectModelOption(inst, orchOpt, undefined, targetPlanner);
+              } else {
+                selectModelOption(inst, orchOpt);
+              }
             },
-          }));
+          }, [
+            el('span', { text: 'Orchestrator' }),
+            el('span', { className: 'agy-pm-switch-track' }, [
+              el('span', { className: 'agy-pm-switch-thumb' }),
+            ]),
+          ]));
         })(entry.orchestratorOption);
       }
 
       var ctxCtrl = inst.ctrl && inst.ctrl.contextWindow;
-      var activeOptForCtx = pickDefaultOption(entry, cat.selectedLabel);
+      var activeOptForCtx = pickDefaultOption(entry, cat.selectedLabel, getCurrentEffort(cat));
       var ctxOpts = activeOptForCtx && Array.isArray(activeOptForCtx.contextWindowOptions) ? activeOptForCtx.contextWindowOptions : null;
       if (ctxCtrl && ctxOpts && ctxOpts.length) {
         for (var cIdx = 0; cIdx < ctxOpts.length; cIdx++) {
@@ -1311,7 +2141,10 @@
           };
           var entry = !isPlaceholder ? (cat.periodicBySymbol[elemObj.symbol] || null) : null;
           var supported = !!entry;
-          var isSelected = supported && isEntrySelected(entry, cat.selectedLabel);
+          var isSelected = supported && (
+            isEntrySelected(entry, cat.selectedLabel)
+            || !!(cat.isOrchestratorSelected && cat.activeOrchestratorElement && cat.activeOrchestratorElement.symbol === elemObj.symbol)
+          );
           var tone = supported ? getToneClass(elemObj.symbol, elemObj.family) : '';
 
           var cls = 'agy-pm-cell'
@@ -1331,6 +2164,8 @@
           var btn = el('button', {
             type: 'button',
             className: cls,
+            disabled: (!supported || isPlaceholder) ? true : false,
+            tabindex: (!supported || isPlaceholder) ? '-1' : undefined,
             'data-testid': 'agy-pm-element-' + elemObj.symbol,
             'data-symbol': elemObj.symbol,
             'data-supported': supported ? 'true' : 'false',
@@ -1338,17 +2173,15 @@
             'aria-label': supported
               ? (entry.base + ' (' + elemObj.symbol + ')')
               : (elemObj.name + ' (' + elemObj.symbol + ', 暂未支持)'),
-            title: supported
-              ? (entry.base + ' · 左键切换，右键锁定挑档位')
-              : (elemObj.number + ' ' + elemObj.name + '（' + elemObj.zhName + '）· 暂未支持'),
+            title: supported ? (entry.base + ' · 左键切换，右键锁定挑档位') : undefined,
             style: { gridRow: String(elemObj.row), gridColumn: String(elemObj.col) },
             onMouseEnter: function () {
-              if (isPlaceholder) return;
+              if (!supported || isPlaceholder) return;
               inst.hoveredEl = elemObj;
               updateDetailCardOnly(inst);
             },
             onFocus: function () {
-              if (isPlaceholder) return;
+              if (!supported || isPlaceholder) return;
               inst.hoveredEl = elemObj;
               updateDetailCardOnly(inst);
             },
@@ -1370,7 +2203,21 @@
                 renderInlineBody(inst);
                 return;
               }
-              var opt = pickDefaultOption(entry, cat.selectedLabel);
+              var curEffort = getCurrentEffort(cat);
+              if (
+                cat.unifiedOrchestratorMode
+                && cat.isOrchestratorSelected
+                && entry.orchestratorOption
+                && entry.orchestratorPlanners
+                && entry.orchestratorPlanners.length
+              ) {
+                var nextPlanner = pickOptionByEffort(entry.orchestratorPlanners, curEffort, 'highest');
+                if (nextPlanner) {
+                  selectModelOption(inst, entry.orchestratorOption, undefined, nextPlanner);
+                  return;
+                }
+              }
+              var opt = pickDefaultOption(entry, cat.selectedLabel, curEffort);
               if (opt) selectModelOption(inst, opt);
             },
           }, cellChildren);
@@ -1397,7 +2244,9 @@
       var quickChildren = [];
       if (cat.periodicEntries.length) {
         quickChildren.push(el('span', { text: '调档位：' }));
-        var activeSym = inst.lockedSymbol || (cat.selectedPeriodic ? cat.selectedPeriodic.element.symbol : null);
+        var activeSym = inst.lockedSymbol
+          || (cat.selectedPeriodic ? cat.selectedPeriodic.element.symbol : null)
+          || (cat.activeOrchestratorElement ? cat.activeOrchestratorElement.symbol : null);
         for (var qi = 0; qi < cat.periodicEntries.length; qi++) {
           (function (pe) {
             var sym = pe.element.symbol;
@@ -1420,7 +2269,7 @@
 
       var footerRightChildren = [];
       if (cat.selectedOther) {
-        footerRightChildren.push(el('span', { text: '当前表外：' + cat.selectedLabel + ' · ' }));
+        footerRightChildren.push(el('span', { text: '当前表外：' + (cat.selectedDisplayLabel || cat.selectedLabel) + ' · ' }));
       }
       if (cat.otherEntries.length) {
         footerRightChildren.push(el('button', {
@@ -1452,11 +2301,12 @@
       if (entry.base.toLowerCase().indexOf(s) !== -1) return true;
       if (entry.tagDescription && entry.tagDescription.toLowerCase().indexOf(s) !== -1) return true;
       if (entry.category && entry.category.label.toLowerCase().indexOf(s) !== -1) return true;
-      if (entry.element) {
-        if (entry.element.symbol.toLowerCase().indexOf(s) !== -1) return true;
-        if (entry.element.name.toLowerCase().indexOf(s) !== -1) return true;
-        if (entry.element.zhName.indexOf(q) !== -1) return true;
-        if (String(entry.element.number) === s) return true;
+      var elemForSearch = entry.element || entry.plannerElement;
+      if (elemForSearch) {
+        if (elemForSearch.symbol.toLowerCase().indexOf(s) !== -1) return true;
+        if (elemForSearch.name.toLowerCase().indexOf(s) !== -1) return true;
+        if (elemForSearch.zhName.indexOf(q) !== -1) return true;
+        if (String(elemForSearch.number) === s) return true;
       }
       if (entry.efforts) {
         for (var i = 0; i < entry.efforts.length; i++) {
@@ -1468,7 +2318,8 @@
 
     function renderModelRow(inst, entry) {
       var cat = inst.catalog;
-      var isSel = isEntrySelected(entry, cat.selectedLabel);
+      var activeOrchPlannerVal = cat.activeOrchestratorPlanner ? cat.activeOrchestratorPlanner.value : 0;
+      var isSel = isEntrySelected(entry, cat.selectedLabel, activeOrchPlannerVal, cat.isOrchestratorSelected);
       var miniTile;
       if (entry.element) {
         miniTile = el('div', {
@@ -1507,7 +2358,9 @@
       if (entry.efforts && entry.efforts.length) {
         for (var i = 0; i < entry.efforts.length; i++) {
           (function (ef) {
-            var active = ef.option.label === cat.selectedLabel;
+            var active = entry.isOrchestratorPlannerEntry
+              ? !!(cat.isOrchestratorSelected && activeOrchPlannerVal && ef.option.value === activeOrchPlannerVal)
+              : (ef.option.label === cat.selectedLabel);
             rightBtns.push(el('button', {
               type: 'button',
               className: 'agy-pm-effort-btn' + (active ? ' is-active' : ''),
@@ -1516,20 +2369,30 @@
               text: ef.label,
               onClick: function (ev) {
                 ev.stopPropagation();
-                selectModelOption(inst, ef.option);
+                if (entry.isOrchestratorPlannerEntry && entry.orchestratorBaseOption) {
+                  selectModelOption(inst, entry.orchestratorBaseOption, undefined, ef.option);
+                } else {
+                  selectModelOption(inst, ef.option);
+                }
               },
             }));
           })(entry.efforts[i]);
         }
       } else if (entry.defaultOption) {
-        var activeSingle = entry.defaultOption.label === cat.selectedLabel;
+        var activeSingle = entry.isOrchestratorPlannerEntry
+          ? !!(cat.isOrchestratorSelected && activeOrchPlannerVal && entry.defaultOption.value === activeOrchPlannerVal)
+          : (entry.defaultOption.label === cat.selectedLabel);
         rightBtns.push(el('button', {
           type: 'button',
           className: 'agy-pm-effort-btn' + (activeSingle ? ' is-active' : ''),
           text: activeSingle ? '当前' : '选择',
           onClick: function (ev) {
             ev.stopPropagation();
-            selectModelOption(inst, entry.defaultOption);
+            if (entry.isOrchestratorPlannerEntry && entry.orchestratorBaseOption) {
+              selectModelOption(inst, entry.orchestratorBaseOption, undefined, entry.defaultOption);
+            } else {
+              selectModelOption(inst, entry.defaultOption);
+            }
           },
         }));
       }
@@ -1540,7 +2403,12 @@
         'data-model-base': entry.base,
         onClick: function (ev) {
           ev.stopPropagation();
-          var opt = pickDefaultOption(entry, cat.selectedLabel);
+          if (entry.isOrchestratorPlannerEntry && entry.orchestratorBaseOption) {
+            var plannerOpt = pickOrchestratorPlannerOption(entry.plannerOptions, cat.selectedLabel, cat.activeOrchestratorPlanner, cat.isOrchestratorSelected) || entry.defaultOption;
+            if (plannerOpt) selectModelOption(inst, entry.orchestratorBaseOption, undefined, plannerOpt);
+            return;
+          }
+          var opt = pickDefaultOption(entry, cat.selectedLabel, getCurrentEffort(cat));
           if (opt) selectModelOption(inst, opt);
         },
       }, [
@@ -1607,6 +2475,162 @@
       return el('div', { className: 'agy-pm-list-wrap' }, secNodes);
     }
 
+    function getQuotaPieColor(bucket) {
+      if (!bucket || bucket.placeholder || bucket.percent === null) return 'var(--pm-border-strong)';
+      if (bucket.percent < 10) return '#ef4444';
+      if (bucket.percent < 25) return '#f59e0b';
+      if (bucket.family === '3p') return '#10b981';
+      return '#3b82f6';
+    }
+
+    function renderQuotaPies() {
+      var items;
+      if (weeklyQuotaStore.allBuckets.length) {
+        items = weeklyQuotaStore.allBuckets;
+      } else {
+        var bridgeGem = readBridgeGeminiWeeklyFallback();
+        items = [
+          bridgeGem
+            ? {
+              id: 'gemini-weekly-fallback',
+              groupIndex: 0,
+              family: 'gemini',
+              groupLabel: 'Gemini',
+              windowLabel: '周额度',
+              title: 'Gemini · 周额度',
+              percent: bridgeGem.percent,
+              fraction: bridgeGem.percent / 100,
+              resetTimeMs: bridgeGem.resetTimeMs,
+              placeholder: false,
+            }
+            : { id: 'gemini-weekly-ph', groupIndex: 0, family: 'gemini', title: 'Gemini · 周额度', percent: null, fraction: 0, resetTimeMs: null, placeholder: true },
+          { id: 'gemini-5h-ph', groupIndex: 0, family: 'gemini', title: 'Gemini · 5h 额度', percent: null, fraction: 0, resetTimeMs: null, placeholder: true },
+          { id: '3p-weekly-ph', groupIndex: 1, family: '3p', title: 'Claude / GPT · 周额度', percent: null, fraction: 0, resetTimeMs: null, placeholder: true },
+          { id: '3p-5h-ph', groupIndex: 1, family: '3p', title: 'Claude / GPT · 5h 额度', percent: null, fraction: 0, resetTimeMs: null, placeholder: true },
+        ];
+      }
+
+      var circ = 2 * Math.PI * 7.5;
+      var children = [];
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (i > 0 && item.groupIndex !== items[i - 1].groupIndex) {
+          children.push(el('span', { className: 'agy-pm-quota-pie-sep', 'aria-hidden': 'true' }));
+        }
+        var color = getQuotaPieColor(item);
+        var svgChildren = [
+          svgEl('circle', {
+            cx: '18',
+            cy: '18',
+            r: '15.5',
+            fill: 'var(--pm-chip-bg)',
+            stroke: 'var(--pm-border)',
+            'stroke-width': '1',
+          }),
+        ];
+        if (!item.placeholder && item.fraction > 0) {
+          var filled = Math.max(0, Math.min(1, item.fraction)) * circ;
+          svgChildren.push(svgEl('circle', {
+            cx: '18',
+            cy: '18',
+            r: '7.5',
+            fill: 'transparent',
+            stroke: color,
+            'stroke-width': '15',
+            'stroke-dasharray': filled.toFixed(2) + ' ' + circ.toFixed(2),
+            transform: 'rotate(-90 18 18)',
+          }));
+        }
+        var resetHint = item.resetTimeMs ? formatResetCountdown(item.resetTimeMs) : '';
+        var metaText = item.placeholder
+          ? '等待同步额度数据'
+          : ('剩余 ' + item.percent + '%' + (resetHint ? (' · ' + resetHint) : ''));
+
+        children.push(el('div', {
+          className: 'agy-pm-quota-pie' + (item.placeholder ? ' is-placeholder' : ''),
+          'data-testid': 'agy-pm-quota-pie',
+          'data-quota-title': item.title,
+          tabindex: '0',
+          'aria-label': item.title + ' ' + metaText,
+        }, [
+          svgEl('svg', {
+            className: 'agy-pm-quota-pie-svg',
+            viewBox: '0 0 36 36',
+            'aria-hidden': 'true',
+          }, svgChildren),
+          el('span', {
+            className: 'agy-pm-quota-pie-pct',
+            text: item.placeholder ? '--' : (item.percent + '%'),
+          }),
+          el('div', { className: 'agy-pm-quota-tip', role: 'tooltip' }, [
+            el('div', { className: 'agy-pm-quota-tip-title', text: item.title }),
+            el('div', { className: 'agy-pm-quota-tip-meta', text: metaText }),
+          ]),
+        ]));
+      }
+
+      return el('div', { className: 'agy-pm-quota-pies', 'data-testid': 'agy-pm-quota-pies' }, children);
+    }
+
+    function formatEquivUsd(val) {
+      if (typeof val !== 'number' || !Number.isFinite(val) || val <= 0) return '--';
+      if (val >= 10) return '$' + Math.round(val);
+      return '$' + val.toFixed(1);
+    }
+
+    function renderEquivCostBadge() {
+      var st = equivCostStore.state;
+      var valText = st ? formatEquivUsd(st.avgMonthlyUsd) : '--';
+      var tierLabel = (st && st.activeTierLabel) ? st.activeTierLabel : '未知档位';
+      var activeEmail = (st && st.activeEmail) ? st.activeEmail : '未登录';
+      var totalRecs = st && typeof st.totalRecords === 'number' ? st.totalRecords : 0;
+      var maxRecs = st && typeof st.maxRecords === 'number' ? st.maxRecords : 20;
+      var breakdown = st && Array.isArray(st.accountBreakdown) ? st.accountBreakdown : [];
+      var neon = st && st.neonPricing ? st.neonPricing : { inputPerMillion: 2, cacheReadPerMillion: 0.2, outputPerMillion: 12, source: 'default' };
+
+      var tipLines = [
+        el('div', { className: 'agy-pm-equiv-tip-title', text: '等效月 API 费用（' + tierLabel + ' · Ultra/Pro 不混合）' }),
+        el('div', { className: 'agy-pm-equiv-tip-line', text: '当前账号：' + activeEmail }),
+      ];
+      if (breakdown.length > 0) {
+        for (var i = 0; i < breakdown.length; i++) {
+          var item = breakdown[i];
+          tipLines.push(el('div', {
+            className: 'agy-pm-equiv-tip-line',
+            text: item.email + '：' + formatEquivUsd(item.avgMonthlyUsd) + '/月（' + item.sampleCount + ' 次采样均值）',
+          }));
+        }
+      } else {
+        tipLines.push(el('div', {
+          className: 'agy-pm-equiv-tip-line',
+          text: '暂无 ' + tierLabel + ' 有效样本：每打开 Agy 自动对账 1 次（需周期内额度有变动）',
+        }));
+      }
+      var srcText = neon.source === 'live' ? '实时' : (neon.source === 'live-estimated' ? '服务端估值' : (neon.locked ? '手动锁定' : '默认参考'));
+      tipLines.push(el('div', {
+        className: 'agy-pm-equiv-tip-line',
+        text: 'Neon 单价（' + srcText + '）：输入 $' + neon.inputPerMillion + ' / 缓存 $' + neon.cacheReadPerMillion + ' / 输出 $' + neon.outputPerMillion + ' / 1M',
+      }));
+      tipLines.push(el('div', {
+        className: 'agy-pm-equiv-tip-line',
+        text: '留档记录：最近 ' + totalRecs + '/' + maxRecs + ' 次 · equiv-api-cost.json',
+      }));
+
+      return el('div', {
+        className: 'agy-pm-equiv-cost',
+        'data-testid': 'agy-pm-equiv-cost',
+        tabindex: '0',
+        'aria-label': '平均等效月API费用：' + valText + '（按Neon计算）',
+      }, [
+        el('span', { className: 'agy-pm-equiv-cost-text' }, [
+          el('span', { text: '平均等效月API费用：' }),
+          el('span', { className: 'agy-pm-equiv-cost-val', 'data-testid': 'agy-pm-equiv-cost-val', text: valText }),
+          el('span', { text: '（按Neon计算）' }),
+        ]),
+        el('div', { className: 'agy-pm-equiv-tip', role: 'tooltip' }, tipLines),
+      ]);
+    }
+
     function renderTabs(inst) {
       var cat = inst.catalog;
       var q = inst.query.trim();
@@ -1625,7 +2649,6 @@
         },
       }, [
         el('span', { className: 'agy-pm-tab-4-badge', text: '4' }),
-        cat.selectedPeriodic ? el('span', { className: 'agy-pm-tab-dot' }) : null,
       ]));
 
       tabs.push(el('button', {
@@ -1657,7 +2680,6 @@
         }, [
           el('span', { text: '其他模型' }),
           el('span', { className: 'agy-pm-tab-count', text: String(cat.otherEntries.length) }),
-          cat.selectedOther ? el('span', { className: 'agy-pm-tab-dot' }) : null,
         ]));
       }
 
@@ -1675,7 +2697,6 @@
             },
           }, [
             el('span', { text: oc.label }),
-            oc.hasSelected ? el('span', { className: 'agy-pm-tab-dot' }) : null,
           ]));
         })(cat.otherCategories[i]);
       }
@@ -1699,6 +2720,14 @@
       if (inst.tabsSlot) {
         inst.tabsSlot.innerHTML = '';
         inst.tabsSlot.appendChild(renderTabs(inst));
+      }
+      if (inst.quotaPiesSlot) {
+        inst.quotaPiesSlot.innerHTML = '';
+        inst.quotaPiesSlot.appendChild(renderQuotaPies());
+      }
+      if (inst.equivCostSlot) {
+        inst.equivCostSlot.innerHTML = '';
+        inst.equivCostSlot.appendChild(renderEquivCostBadge());
       }
       if (inst.searchInput && inst.searchInput.value !== inst.query) {
         inst.searchInput.value = inst.query;
@@ -1724,6 +2753,10 @@
           inst.popover.style.marginLeft = '';
         }
         if (nativeList) nativeList.removeAttribute(HIDDEN_ATTR);
+        var hiddenNodes = inst.panel.querySelectorAll ? inst.panel.querySelectorAll('[' + HIDDEN_ATTR + '="1"]') : [];
+        for (var hi = 0; hi < hiddenNodes.length; hi++) {
+          hiddenNodes[hi].removeAttribute(HIDDEN_ATTR);
+        }
         if (inst.inlineRoot) inst.inlineRoot.style.display = 'none';
         if (inst.nativeBar) inst.nativeBar.style.display = '';
       } else {
@@ -1734,6 +2767,10 @@
           inst.popover.style.setProperty('min-width', '0', 'important');
         }
         if (nativeList) nativeList.setAttribute(HIDDEN_ATTR, '1');
+        var footerNodes = findNativeFooterNodesToHide(inst.panel);
+        for (var fi = 0; fi < footerNodes.length; fi++) {
+          footerNodes[fi].setAttribute(HIDDEN_ATTR, '1');
+        }
         if (inst.inlineRoot) inst.inlineRoot.style.display = '';
         if (inst.nativeBar) inst.nativeBar.style.display = 'none';
         nudgePopoverWithinViewport(inst.popover);
@@ -1760,19 +2797,36 @@
       if (existing && existing.inlineRoot && existing.inlineRoot.isConnected) {
         existing.ctrl = ctrl;
         var realSel = (ctrl.selectedModel && ctrl.selectedModel.label) || '';
+        var realOrchPlanner = (ctrl.orchestratorPick && typeof ctrl.orchestratorPick.model === 'number')
+          ? ctrl.orchestratorPick.model
+          : 0;
         // 一旦 React 状态已经同步到我们刚选中的模型，清掉本地乐观覆盖值
         if (existing.selectedOverride && realSel === existing.selectedOverride) {
           existing.selectedOverride = '';
         }
-        var nextSig = computeCatalogSignature(ctrl, existing.selectedOverride);
+        if (existing.selectedOrchestratorPlannerValue) {
+          if (
+            realOrchPlanner === existing.selectedOrchestratorPlannerValue
+            || realOrchPlanner !== existing.prevOrchPlannerValue
+            || (!existing.selectedOverride && !isOrchestratorModelOption(ctrl.selectedModel))
+          ) {
+            existing.selectedOrchestratorPlannerValue = 0;
+            existing.prevOrchPlannerValue = 0;
+          }
+        }
+        var nextSig = computeCatalogSignature(ctrl, existing.selectedOverride, existing.selectedOrchestratorPlannerValue, panel);
         if (!existing.useNative) {
           var nl = findNativeListNode(panel);
           if (nl && nl.getAttribute(HIDDEN_ATTR) !== '1') nl.setAttribute(HIDDEN_ATTR, '1');
+          var fns = findNativeFooterNodesToHide(panel);
+          for (var fni = 0; fni < fns.length; fni++) {
+            if (fns[fni].getAttribute(HIDDEN_ATTR) !== '1') fns[fni].setAttribute(HIDDEN_ATTR, '1');
+          }
         }
         // 数据未变化时不碰 DOM，彻底避免定时扫描触发按钮 hover 跳变或滚动条重置
         if (nextSig !== existing.sig) {
           existing.sig = nextSig;
-          existing.catalog = buildCatalog(ctrl, existing.selectedOverride);
+          existing.catalog = buildCatalog(ctrl, existing.selectedOverride, existing.selectedOrchestratorPlannerValue, panel);
           if (!existing.useNative) renderInlineContent(existing);
         }
         return true;
@@ -1780,8 +2834,8 @@
 
       var popover = findPopoverContainer(panel);
       var dark = detectDarkTheme(popover || panel);
-      var catalog = buildCatalog(ctrl);
-      var initialSig = computeCatalogSignature(ctrl);
+      var catalog = buildCatalog(ctrl, '', 0, panel);
+      var initialSig = computeCatalogSignature(ctrl, '', 0, panel);
 
       var inst = {
         panel: panel,
@@ -1790,14 +2844,20 @@
         catalog: catalog,
         sig: initialSig,
         selectedOverride: '',
+        selectedOrchestratorPlannerValue: 0,
+        prevOrchPlannerValue: 0,
         activeTab: 'periodic',
         query: '',
-        lockedSymbol: catalog.selectedPeriodic ? catalog.selectedPeriodic.element.symbol : null,
+        lockedSymbol: catalog.selectedPeriodic
+          ? catalog.selectedPeriodic.element.symbol
+          : (catalog.activeOrchestratorElement ? catalog.activeOrchestratorElement.symbol : null),
         hoveredEl: null,
         useNative: false,
         inlineRoot: null,
         nativeBar: null,
         tabsSlot: null,
+        quotaPiesSlot: null,
+        equivCostSlot: null,
         bodySlot: null,
         searchInput: null,
         searchClear: null,
@@ -1829,8 +2889,13 @@
               var cand = inst.catalog.allEntries[si];
               if (matchesQuery(cand, q)) {
                 ev.preventDefault();
-                var opt = pickDefaultOption(cand, inst.catalog.selectedLabel);
-                if (opt) selectModelOption(inst, opt);
+                if (cand.isOrchestratorPlannerEntry && cand.orchestratorBaseOption) {
+                  var pOpt = pickOrchestratorPlannerOption(cand.plannerOptions, inst.catalog.selectedLabel, inst.catalog.activeOrchestratorPlanner, inst.catalog.isOrchestratorSelected) || cand.defaultOption;
+                  if (pOpt) selectModelOption(inst, cand.orchestratorBaseOption, undefined, pOpt);
+                } else {
+                  var opt = pickDefaultOption(cand, inst.catalog.selectedLabel, getCurrentEffort(inst.catalog));
+                  if (opt) selectModelOption(inst, opt);
+                }
                 return;
               }
             }
@@ -1873,8 +2938,8 @@
               if (panel.isConnected) {
                 var fresh = resolveControllerForPanel(panel);
                 if (fresh) inst.ctrl = fresh;
-                inst.catalog = buildCatalog(inst.ctrl, inst.selectedOverride);
-                inst.sig = computeCatalogSignature(inst.ctrl, inst.selectedOverride);
+                inst.catalog = buildCatalog(inst.ctrl, inst.selectedOverride, inst.selectedOrchestratorPlannerValue, inst.panel);
+                inst.sig = computeCatalogSignature(inst.ctrl, inst.selectedOverride, inst.selectedOrchestratorPlannerValue, inst.panel);
                 renderInlineContent(inst);
               }
             });
@@ -1894,20 +2959,26 @@
         },
       });
 
-      var tabsSlot = el('div', { style: { display: 'flex', flex: '1 1 auto', minWidth: '0' } });
+      var tabsSlot = el('div', { style: { display: 'flex', minWidth: '0' } });
+      var quotaPiesSlot = el('div', { className: 'agy-pm-quota-pies-slot' });
+      var equivCostSlot = el('div', { className: 'agy-pm-equiv-cost-slot' });
       var bodySlot = el('div', {});
 
       var topbar = el('div', { className: 'agy-pm-topbar' }, [
-        tabsSlot,
-        el('div', { className: 'agy-pm-tools' }, [
-          el('div', { className: 'agy-pm-search-box' }, [
-            el('span', { className: 'agy-pm-search-icon', text: '⌕' }),
-            searchInput,
-            searchClear,
+        el('div', { className: 'agy-pm-topbar-left' }, [
+          tabsSlot,
+          el('div', { className: 'agy-pm-tools' }, [
+            el('div', { className: 'agy-pm-search-box' }, [
+              el('span', { className: 'agy-pm-search-icon', text: '⌕' }),
+              searchInput,
+              searchClear,
+            ]),
+            refreshBtn,
+            nativeToggleBtn,
+            equivCostSlot,
           ]),
-          refreshBtn,
-          nativeToggleBtn,
         ]),
+        quotaPiesSlot,
       ]);
 
       var inlineRoot = el('div', {
@@ -1935,11 +3006,13 @@
       inst.inlineRoot = inlineRoot;
       inst.nativeBar = nativeBar;
       inst.tabsSlot = tabsSlot;
+      inst.quotaPiesSlot = quotaPiesSlot;
+      inst.equivCostSlot = equivCostSlot;
       inst.bodySlot = bodySlot;
       inst.searchInput = searchInput;
       inst.searchClear = searchClear;
 
-      // 将周期表面板和原版切回栏插入到 panel 最前面，保留下方原生「查看用量」不变
+      // 将周期表面板和原版切回栏插入到 panel 最前面；周期表模式下自动隐藏底部原生「查看用量」
       panel.insertBefore(nativeBar, panel.firstChild);
       panel.insertBefore(inlineRoot, nativeBar);
 
@@ -1952,6 +3025,7 @@
     }
 
     function scanPanels() {
+      readEquivCostFromBridge();
       if (!w.document || !w.document.querySelectorAll) return;
       var panels = w.document.querySelectorAll('[data-testid="model-selector-panel"]');
       for (var i = 0; i < panels.length; i++) {
@@ -2030,11 +3104,46 @@
       w.document.addEventListener('DOMContentLoaded', bootAndScan);
       w.document.addEventListener('readystatechange', bootAndScan);
     }
-    if (typeof w.addEventListener === 'function') {
-      w.addEventListener('load', bootAndScan);
-      w.addEventListener('__agy_quota_bridge_v1__', scheduleScan);
+    function syncQuotaFromSiblingBridge() {
+      if (equivUpState.quotaSeq > 0) return;
+      try {
+        if (!w.sessionStorage) return;
+        var raw = w.sessionStorage.getItem('__agy_quota_bridge_v1__');
+        if (!raw) return;
+        var parsed = JSON.parse(raw);
+        var s = parsed && parsed.summary;
+        if (!s || typeof s.remainingFraction !== 'number' || !Number.isFinite(s.remainingFraction)) return;
+        if (typeof s.resetTimeMs !== 'number' || !Number.isFinite(s.resetTimeMs)) return;
+        equivUpState.quota = {
+          remainingFraction: Math.max(0, Math.min(1, s.remainingFraction)),
+          resetTimeMs: s.resetTimeMs,
+          bucketId: 'sibling-bridge',
+          disabled: Boolean(s.disabled),
+          ts: typeof s.ts === 'number' && Number.isFinite(s.ts) ? s.ts : Date.now(),
+        };
+        equivUpState.quotaSeq += 1;
+        publishEquivUp();
+      } catch (_) {}
     }
 
+    function onSiblingQuotaBridge() {
+      syncQuotaFromSiblingBridge();
+      scheduleScan();
+    }
+
+    function onEquivDownUpdate() {
+      readEquivCostFromBridge();
+      scheduleScan();
+    }
+
+    if (typeof w.addEventListener === 'function') {
+      w.addEventListener('load', bootAndScan);
+      w.addEventListener('__agy_quota_bridge_v1__', onSiblingQuotaBridge);
+      w.addEventListener(DOWN_KEY, onEquivDownUpdate);
+    }
+
+    readEquivCostFromBridge();
+    syncQuotaFromSiblingBridge();
     bootAndScan();
     var fallbackTimer = w.setInterval(bootAndScan, 350);
     if (fallbackTimer && typeof fallbackTimer.unref === 'function') fallbackTimer.unref();
@@ -2045,40 +3154,135 @@
       matchGemini4Element: matchGemini4Element,
       ingestWeeklyQuotaSummary: ingestWeeklyQuotaSummary,
       lookupWeeklyQuota: lookupWeeklyQuota,
+      setEquivCostState: function (nextState) {
+        if (nextState && typeof nextState === 'object') {
+          equivCostStore.state = nextState;
+          equivCostStore.version += 1;
+          try {
+            var rawNext = JSON.stringify(nextState);
+            equivCostStore.raw = rawNext;
+            if (w.sessionStorage) w.sessionStorage.setItem(DOWN_KEY, rawNext);
+          } catch (_) {}
+          scanPanels();
+        }
+      },
+      getEquivCostState: function () { return equivCostStore.state; },
       enhancePanel: enhancePanel,
       scanPanels: scanPanels,
       getActiveInstance: function () { return activeInstance; },
     };
   }
 
+  var CH_GET_SYNC = 'agy-pm-equiv:get-state-sync';
+  var CH_REPORT_USER = 'agy-pm-equiv:report-user';
+  var CH_REPORT_SIGNOUT = 'agy-pm-equiv:report-signout';
+  var CH_REPORT_QUOTA = 'agy-pm-equiv:report-quota';
+  var CH_REPORT_PRICING = 'agy-pm-equiv:report-pricing';
+  var CH_UPDATED = 'agy-pm-equiv:state-updated';
+
   var webFrame = null;
+  var ipc = null;
   try {
     var reqFn = typeof require === 'function' ? require : (typeof g.require === 'function' ? g.require : null);
     if (reqFn) {
       var electronMod = reqFn('electron');
-      if (electronMod) webFrame = electronMod.webFrame || null;
+      if (electronMod) {
+        webFrame = electronMod.webFrame || null;
+        ipc = electronMod.ipcRenderer || null;
+      }
     }
   } catch (_) {}
+
+  var lastEquivDownState = null;
+  function publishEquivDownState(state) {
+    if (!state || typeof state !== 'object') return;
+    lastEquivDownState = state;
+    try {
+      if (g.sessionStorage) g.sessionStorage.setItem(EQUIV_DOWN_KEY, JSON.stringify(state));
+      if (typeof g.dispatchEvent === 'function' && typeof g.Event === 'function') {
+        g.dispatchEvent(new g.Event(EQUIV_DOWN_KEY));
+      }
+    } catch (_) {}
+  }
+
+  var lastForwarded = { userSeq: 0, signOutSeq: 0, quotaSeq: 0, pricingSeq: 0 };
+  function handleEquivUpEvent() {
+    if (!ipc || typeof ipc.invoke !== 'function') return;
+    var data = null;
+    try {
+      var raw = g.sessionStorage && g.sessionStorage.getItem(EQUIV_UP_KEY);
+      if (raw) data = JSON.parse(raw);
+    } catch (_) {}
+    if (!data || typeof data !== 'object') return;
+
+    if (typeof data.userSeq === 'number' && data.userSeq > lastForwarded.userSeq && data.user) {
+      lastForwarded.userSeq = data.userSeq;
+      Promise.resolve(ipc.invoke(CH_REPORT_USER, data.user)).then(publishEquivDownState).catch(function () {});
+    }
+    if (typeof data.signOutSeq === 'number' && data.signOutSeq > lastForwarded.signOutSeq) {
+      lastForwarded.signOutSeq = data.signOutSeq;
+      Promise.resolve(ipc.invoke(CH_REPORT_SIGNOUT, { ts: data.signOutAt || Date.now() })).then(publishEquivDownState).catch(function () {});
+    }
+    if (typeof data.pricingSeq === 'number' && data.pricingSeq > lastForwarded.pricingSeq && Array.isArray(data.pricing) && data.pricing.length) {
+      lastForwarded.pricingSeq = data.pricingSeq;
+      Promise.resolve(ipc.invoke(CH_REPORT_PRICING, data.pricing)).then(publishEquivDownState).catch(function () {});
+    }
+    if (typeof data.quotaSeq === 'number' && data.quotaSeq > lastForwarded.quotaSeq && data.quota) {
+      lastForwarded.quotaSeq = data.quotaSeq;
+      Promise.resolve(ipc.invoke(CH_REPORT_QUOTA, data.quota)).then(publishEquivDownState).catch(function () {});
+    }
+  }
+
+  if (typeof g.addEventListener === 'function') {
+    g.addEventListener(EQUIV_UP_KEY, handleEquivUpEvent);
+  }
+
+  if (ipc && typeof ipc.on === 'function') {
+    try {
+      ipc.on(CH_UPDATED, function (_ev, nextState) {
+        publishEquivDownState(nextState);
+      });
+    } catch (_) {}
+  }
+
+  if (ipc && typeof ipc.sendSync === 'function') {
+    try {
+      var initState = ipc.sendSync(CH_GET_SYNC);
+      publishEquivDownState(initState);
+    } catch (_) {}
+  }
 
   function injectMainWorld() {
     var injected = false;
     try {
       if (webFrame && typeof webFrame.executeJavaScript === 'function') {
-        var script = '(' + installPeriodicModelSelector.toString() + ')();';
-        Promise.resolve(webFrame.executeJavaScript(script)).catch(function () {});
+        var script = '(' + installPeriodicModelSelector.toString() + ')('
+          + JSON.stringify(EQUIV_UP_KEY) + ', '
+          + JSON.stringify(EQUIV_DOWN_KEY) + ');';
+        Promise.resolve(webFrame.executeJavaScript(script)).then(function () {
+          if (lastEquivDownState) publishEquivDownState(lastEquivDownState);
+        }).catch(function () {});
         injected = true;
       }
     } catch (_) {}
     if (!injected) {
-      installPeriodicModelSelector();
+      installPeriodicModelSelector(EQUIV_UP_KEY, EQUIV_DOWN_KEY);
+      if (lastEquivDownState) publishEquivDownState(lastEquivDownState);
     }
   }
 
   injectMainWorld();
+  handleEquivUpEvent();
   if (g.document && typeof g.document.addEventListener === 'function') {
-    g.document.addEventListener('DOMContentLoaded', injectMainWorld, { once: true });
+    g.document.addEventListener('DOMContentLoaded', function () {
+      injectMainWorld();
+      if (lastEquivDownState) publishEquivDownState(lastEquivDownState);
+    }, { once: true });
   }
   if (typeof g.addEventListener === 'function') {
-    g.addEventListener('load', injectMainWorld, { once: true });
+    g.addEventListener('load', function () {
+      injectMainWorld();
+      if (lastEquivDownState) publishEquivDownState(lastEquivDownState);
+    }, { once: true });
   }
 })();

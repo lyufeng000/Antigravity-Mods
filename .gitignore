@@ -2,6 +2,7 @@
 **/node_modules/
 agy-zh-cn/work/
 agy-weekly-quota/accounts.json
+agy-periodic-model/equiv-api-cost.json
 *.log
 *.tmp
 .DS_Store

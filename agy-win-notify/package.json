@@ -1,0 +1,13 @@
+{
+  "name": "agy-win-notify",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity Windows 系统通知点击跳转修复补丁（绑定 AUMID、保活 Notification 实例、修复 BaseWindow WebContents 派发并绕过 Windows 焦点抢占限制）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/patch.mjs --wait-exit --relaunch",
+    "restore": "node patcher/restore.mjs --wait-exit --relaunch"
+  }
+}

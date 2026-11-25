@@ -13,6 +13,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const SCRIPT_DIR = path.resolve(here, '..');
 export const PROJECT_DIR = path.resolve(SCRIPT_DIR, '..');
 export const PRELOAD_SCRIPT = process.env.AGY_PERIODIC_MODEL_PRELOAD_SCRIPT || path.join(PROJECT_DIR, 'src', 'periodic-model-preload.js');
+export const MAIN_IPC_SCRIPT = process.env.AGY_PERIODIC_MODEL_MAIN_SCRIPT || path.join(PROJECT_DIR, 'src', 'periodic-model-main-ipc.js');
+export const EQUIV_COST_FILE = process.env.AGY_EQUIV_COST_FILE || path.join(PROJECT_DIR, 'equiv-api-cost.json');
 
 const sharedBackupDir = path.resolve(PROJECT_DIR, '..', '.backup');
 export const BACKUP_DIR = process.env.AGY_PERIODIC_MODEL_BACKUP_DIR || process.env.AGY_BACKUP_DIR || process.env.AGY_ZH_BACKUP_DIR || sharedBackupDir;
@@ -21,8 +23,11 @@ export const LOG_FILE = path.join(WORK_ROOT, 'patch.log');
 
 export const MARK_BEGIN = '/*AGY-PERIODIC-MODEL-BEGIN*/';
 export const MARK_END = '/*AGY-PERIODIC-MODEL-END*/';
+export const MAIN_MARK_BEGIN = '/*AGY-PERIODIC-MODEL-MAIN-BEGIN*/';
+export const MAIN_MARK_END = '/*AGY-PERIODIC-MODEL-MAIN-END*/';
 export const ANY_PATCH_RE = /\/\*AGY-[A-Z0-9_-]+-BEGIN\*\//;
 export const PRELOAD = 'dist/preload.js';
+export const MAIN_JS = 'dist/main.js';
 
 export function log(...a) {
   const line = `[${new Date().toISOString()}] ${a.join(' ')}`;
@@ -42,8 +47,22 @@ export function rmWork(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-export function isPatched(asarPath = ASAR) {
+export function isPreloadPatched(asarPath = ASAR) {
   return fs.readFileSync(asarPath).includes(Buffer.from(MARK_BEGIN, 'latin1'));
+}
+
+export function isMainPatched(asarPath = ASAR) {
+  return fs.readFileSync(asarPath).includes(Buffer.from(MAIN_MARK_BEGIN, 'latin1'));
+}
+
+export function isPatched(asarPath = ASAR) {
+  const buf = fs.readFileSync(asarPath);
+  return buf.includes(Buffer.from(MARK_BEGIN, 'latin1')) && buf.includes(Buffer.from(MAIN_MARK_BEGIN, 'latin1'));
+}
+
+export function hasPeriodicPatch(asarPath = ASAR) {
+  const buf = fs.readFileSync(asarPath);
+  return buf.includes(Buffer.from(MARK_BEGIN, 'latin1')) || buf.includes(Buffer.from(MAIN_MARK_BEGIN, 'latin1'));
 }
 
 export function hasAnyPatch(asarPath = ASAR) {

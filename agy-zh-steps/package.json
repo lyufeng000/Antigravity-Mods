@@ -1,0 +1,13 @@
+{
+  "name": "agy-zh-steps",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity 中文步骤与状态摘要补丁（等长 UTF-8 原位替换 language_server.exe 内置步骤清单、状态摘要及辅助标签描述）",
+  "scripts": {
+    "test": "node --test",
+    "check": "node patcher/check.mjs",
+    "patch": "node patcher/patch.mjs --wait-exit --relaunch",
+    "restore": "node patcher/restore.mjs --wait-exit --relaunch"
+  }
+}
