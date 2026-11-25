@@ -2,6 +2,7 @@
   "name": "antigravity-mods",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "description": "Antigravity 汉化与增强插件：含全量简体中文界面、中文对话标题、中文步骤卡片、压缩自动重命名、多账号额度查看、文件右键菜单增强、实时 Token 测速、周期表模型选择器（含等效 API 价格）、Windows 通知跳转共 9 项功能，发给 AI 一句话即可自动安装、按需启用与一键还原。",
   "scripts": {
     "check": "node repatch-all.mjs check",
