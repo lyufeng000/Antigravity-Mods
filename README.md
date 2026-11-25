@@ -1,53 +1,85 @@
-# Antigravity-Mods（Agent-Native 补丁生效项目）
+# Antigravity 汉化与增强插件
 
-本项目集中管理 Antigravity 桌面端的 **9 项增强与本地化补丁**。项目以 [AGENTS.md](./AGENTS.md) 作为流程驱动核心——无论是自己本地用，还是把 GitHub 仓库地址直接发给朋友，**让 AI Agent 接手即可全自动完成克隆、依赖安装、体检、按需勾选、预检生效与远端更新**。
+专为 **Antigravity 桌面端** 打造的中文汉化与实用增强补丁合集，共包含 **9 项功能**：全量简体中文界面、中文对话标题、中文步骤卡片、压缩自动重命名、多账号额度查看、文件右键菜单增强、实时 Token 测速、周期表模型选择器（含等效 API 价格换算）、Windows 通知跳转。
 
-> [!IMPORTANT]
-> **AI Agent 接管指令（收到本仓库地址或刚克隆本仓库时必读）**：
-> 1. 固定持久化目录为 `%USERPROFILE%\.antigravity-mods`（已有则直接复用并运行 `node repatch-all.mjs update --json`，没有再 `git clone https://github.com/lyufeng000/Antigravity-Mods.git "%USERPROFILE%\.antigravity-mods"`）。
-> 2. **严禁在 `%TEMP%` / `AppData\Local\Temp` / `/tmp` 等系统临时目录里直接运行安装或生成 `.backup/`**。
-> 3. 进入固定目录装好依赖（`npm.cmd install --no-package-lock`）后，**立即读取 [AGENTS.md](./AGENTS.md)** 从 Step 1 开始引导用户。
-
-## 方式一：把仓库地址发给朋友的 Agent（零门槛远端安装）
-
-只要电脑上装了 Antigravity 客户端、Node.js 和 Git，打开任意 AI 编程助手（Antigravity / Claude Code / Cursor 等）把仓库链接和一句话发给它即可：
-
-> **直接复制发给 Agent**：
-> `https://github.com/lyufeng000/Antigravity-Mods.git 给我安装这些补丁`
-
-Agent 会按上方指引完成目录就位、装好依赖，并移交 [AGENTS.md](./AGENTS.md) 接管（全自动体检出表、交互勾选、预检门禁与生效，无需用户手动敲命令）。
+**全程零门槛**：不需要自己记命令行，把仓库链接发给 AI 助手，一句话即可自动完成环境检查、按需勾选安装、版本更新或一键还原官方原版。
 
 ---
 
-## 方式二：已在本地工作区直接对话
+## 快速安装（推荐）
 
-在 Antigravity 中打开本仓库目录后，直接用自然语言说一句即可：
+只要电脑上已安装 Antigravity 客户端、Node.js 和 Git，打开 Antigravity（或 Claude Code / Cursor 等任意 AI 助手），直接复制下面这句话发给它：
 
-- **第一次用 / 安装插件**：`安装插件` 或 `帮我检查当前状态并按需启用补丁`
-- **只想要某几个功能**：`帮我只启用汉化、Windows 通知跳转和压缩自动改名，其余不要`
-- **同步 GitHub 最新版本**：`更新补丁`、`检查更新` 或 `同步远端`
-- **想看现在装了哪些补丁**：`体检` 或 `看看现在 9 个补丁分别是什么状态`
-- **临时想退回官方原版**：`还原原版` 或 `帮我把 Antigravity 完整还原成官方未修改原版`
-- **大版本更新后出现新英文**：`客户端升级了，帮我检查并补译新增英文词条`
+```text
+https://github.com/lyufeng000/Antigravity-Mods.git 给我安装这些补丁
+```
 
-> 涉及修改客户端核心文件且客户端正在运行时，只需按 Agent 提示手动关闭一次窗口，后台会在 3～5 秒内自动完成注入并重开。
+AI 会自动帮你拉取仓库、检查当前客户端版本，并弹出选项让你选择 **一键全量开启** 或 **按需挑选某几项功能**。
 
-## 内置 9 项补丁一览
+> **提示**：当修改涉及客户端核心文件且 Antigravity 正在运行时，按 AI 提示手动关闭一次窗口，后台会在 3～5 秒内自动完成替换并重新打开客户端。
 
-| 短 ID | 补丁名称 | 能力简介 | 生效目标 | 需关窗重开 |
-| :--- | :--- | :--- | :--- | :--- |
-| `zh-cn` | 全量简体中文界面 | Antigravity 界面全量简体中文汉化与动态翻译（`agy-zh-cn/`） | `app.asar` | 是 |
-| `weekly-quota` | 左下角周额度插槽 | 左下角「设置」上方多账号周额度面板，0 主动请求（`agy-weekly-quota/`） | `app.asar` | 是 |
-| `file-menu` | 本地文件增强右键菜单 | 支持复制、复制路径、资源管理器定位与默认浏览器/程序打开（`agy-file-menu/`） | `app.asar` | 是 |
-| `token-meter` | 实时 Tokens 与速度统计 | 输入框下方实时展示 `tok/s` 速度、上下文占比与日/周消耗（`agy-token-meter/`） | `app.asar` | 是 |
-| `periodic-model` | 周期表模型选择器 | Gemini 4 元素周期表选择器、分桶周额度饼图与同档位等效月 API 费用（`agy-periodic-model/`） | `app.asar` | 是 |
-| `win-notify` | Windows 通知点击跳转 | 绑定匹配 `AppUserModelId`、保活通知实例并修复多窗口点击前置（`agy-win-notify/`） | `app.asar` | 是 |
-| `zh-title` | 中文对话标题 | 等长原位替换标题生成提示词，新对话源头输出简体中文标题（`agy-zh-title/`） | `language_server.exe` | 是 |
-| `zh-steps` | 中文步骤与状态卡片 | 等长原位替换 9 处步骤清单、焦点状态及工具标签约束（`agy-zh-steps/`） | `language_server.exe` | 是 |
-| `compact-retitle` | 压缩后自动重命名 | 自动或 `/compact` 压缩后通过原生钩子唤醒并更新中文对话标题（`agy-compact-retitle/`） | `~/.gemini/config/plugins/` | 否 |
+---
 
-## 仓库关键文档
+## 核心功能预览
 
-- [AGENTS.md](./AGENTS.md)：Agent 补丁生效与远端更新总控流程（远端接入 → 体检 → 勾选 → 预检 → 安全执行 → 验收回滚）。
-- [DEV_GUIDE.md](./DEV_GUIDE.md)：补丁模块研发规范、多补丁共存红线与测试门禁（仅开发或修改源码时阅读）。
-- [repatch-all.mjs](./repatch-all.mjs)：底层 9 项联合编排引擎（支持 `check --json`、`update`、`--only` / `--exclude`、`--dry-only` 与 `restore`）。
+### 1. 全量简体中文界面 & 全链路中文体验
+将设置面板、菜单、状态栏、提示信息等界面全量汉化；同时支持新建对话**自动生成中文标题**、Agent 执行过程的**步骤清单与状态卡片全中文展示**，以及对话上下文压缩后**自动重新生成中文标题**。
+
+![全量简体中文界面](./assets/zh-cn-settings.jpg)
+
+### 2. 周期表模型选择器
+将模型切换面板升级为直观的 **Gemini 4 元素周期表**，一目了然查看各模型分桶周额度饼图，并可快速切换推理档位（Low / Medium / High）。
+
+![周期表模型选择器](./assets/periodic-model.jpg)
+
+### 3. 等效 API 价格换算
+在模型面板顶部实时根据当前消耗比例，自动换算出同档位模型的**平均等效月 API 费用**（例如图中按 Neon 计算等效月消耗 `$1343`），直观展示你用掉的额度价值多少美元 API。
+
+![等效 API 价格换算](./assets/api-cost.jpg)
+
+### 4. 多账号额度查看
+在左下角「设置」按钮上方常驻展示当前账号及已登录过账号的**每周剩余限额百分比**与**重置倒计时**（零主动轮询请求，安全轻量）。
+
+![多账号额度查看](./assets/weekly-quota.png)
+
+---
+
+## 全部 9 项功能一览
+
+所有功能既可一键全开，也可随时按需自由组合：
+
+| 功能名称 | 短 ID | 功能说明 | 需重启客户端 |
+| :--- | :--- | :--- | :---: |
+| **全量简体中文界面** | `zh-cn` | 客户端界面全量简体中文汉化与动态文本翻译 | 是 |
+| **中文对话标题** | `zh-title` | 从源头替换标题生成提示词，新建对话自动输出简体中文标题 | 是 |
+| **中文步骤卡片** | `zh-steps` | Agent 执行时的步骤清单、焦点状态及工具标签统一输出简体中文 | 是 |
+| **压缩自动重命名** | `compact-retitle` | 自动压缩或执行 `/compact` 后，自动唤醒并更新中文对话标题 | **否（即时生效）** |
+| **多账号额度查看** | `weekly-quota` | 左下角「设置」上方展示多账号每周剩余额度与重置时间（0 主动请求） | 是 |
+| **文件右键菜单增强** | `file-menu` | 本地文件链接右键支持复制、复制路径、资源管理器定位与默认程序打开 | 是 |
+| **实时 Token 测速** | `token-meter` | 输入框下方实时展示 `tok/s` 输出速度、上下文占用比例与日/周消耗统计 | 是 |
+| **周期表模型选择器** | `periodic-model` | Gemini 4 元素周期表选模型、分桶周额度饼图与等效月 API 费用换算 | 是 |
+| **Windows 通知跳转** | `win-notify` | 修复 Windows 系统通知点击不响应问题，点击通知精准跳转并前置对应窗口 | 是 |
+
+---
+
+## 日常管理口令（直接对 AI 说即可）
+
+安装完成后，随时可以对 AI 助手说下面这些话来管理补丁：
+
+- **只开启部分功能**：`帮我只启用汉化、多账号额度查看和周期表模型选择器，其余不要`
+- **查看当前状态**：`看看现在 9 个补丁分别是什么状态`
+- **同步 GitHub 最新版**：`更新补丁` 或 `检查更新`
+- **客户端升级后恢复**：`客户端升级了，帮我重新打上补丁`
+- **随时退回官方原版**：`帮我把 Antigravity 完整还原成官方原版`
+
+---
+
+> [!IMPORTANT]
+> **AI Agent 接管指令（当 AI 收到本仓库地址或刚克隆本仓库时必读）**：
+> 1. 固定持久化目录为 `%USERPROFILE%\.antigravity-mods`（已有则直接复用并运行 `node repatch-all.mjs update --json`，没有再执行 `git clone https://github.com/lyufeng000/Antigravity-Mods.git "%USERPROFILE%\.antigravity-mods"`）。
+> 2. **严禁在 `%TEMP%` / `AppData\Local\Temp` / `/tmp` 等系统临时目录里直接运行安装或生成 `.backup/`**。
+> 3. 进入固定目录装好依赖（`npm.cmd install --no-package-lock`）后，**立即读取 [AGENTS.md](./AGENTS.md)** 从 Step 1 开始引导用户完成体检、勾选与安装。
+
+### 维护与研发文档
+- [AGENTS.md](./AGENTS.md)：AI 自动体检、按需安装、升级恢复与无损还原标准流程。
+- [DEV_GUIDE.md](./DEV_GUIDE.md)：补丁模块研发规范、多补丁共存要求与测试门禁。
