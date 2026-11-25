@@ -1,0 +1,21 @@
+{
+  "name": "antigravity-mods",
+  "private": true,
+  "type": "module",
+  "description": "Antigravity Agent-Native 补丁生效与联合编排项目",
+  "scripts": {
+    "check": "node repatch-all.mjs check",
+    "dry": "node repatch-all.mjs --dry-only",
+    "patch": "node repatch-all.mjs",
+    "restore": "node repatch-all.mjs restore",
+    "update": "node repatch-all.mjs update",
+    "update:check": "node repatch-all.mjs update --check",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@electron/asar": "^3.4.1",
+    "acorn": "^8.14.0",
+    "acorn-walk": "^8.3.4",
+    "jsdom": "^25.0.1"
+  }
+}

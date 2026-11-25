@@ -52,6 +52,7 @@ const env = {
   AGY_FILE_MENU_TEMP: path.join(ROOT, 'work-file-menu'),
   AGY_TOKEN_METER_TEMP: path.join(ROOT, 'work-token-meter'),
   AGY_REPATCH_TEMP: path.join(ROOT, 'work-repatch'),
+  AGY_COMPACT_RETITLE_DEST: path.join(ROOT, 'plugins', 'agy-compact-retitle'),
 };
 
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
@@ -145,7 +146,7 @@ test('四补丁依次叠加、单独剥离 agy-token-meter 与 repatch-all 四�
   assert.equal(count(m2, MAIN_MARK_BEGIN), 0);
 
   // repatch-all 一键注入并 check 校验四补丁全绿
-  r = runNode(REPATCH_ALL, 'patch', '--no-relaunch');
+  r = runNode(REPATCH_ALL, 'patch', '--exclude', 'zh-title,zh-steps,compact-retitle', '--no-relaunch');
   assert.equal(r.status, 0, r.stderr + r.stdout);
   r = runNode(REPATCH_ALL, 'check', '--json');
   assert.equal(r.status, 0, r.stderr + r.stdout);

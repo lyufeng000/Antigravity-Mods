@@ -1,71 +1,99 @@
-# Antigravity 爆改补丁工作区开发规范（AGENTS.md）
+# Antigravity 补丁生效总控流程（AGENTS.md）
 
-本工作区（仓库 `lyufeng000/Antigravity-Mods`）集中维护 Antigravity 桌面端的所有独立改造补丁与联合更新恢复编排器。任何在本项目内新增、改造或修复补丁功能的开发，必须遵守以下规范。
+本项目是 **纯 Agent-Native 补丁生效项目**：所有环境检查、状态体检、预检验证、按需安装、升级恢复、还原卸载与异常排查，全部由 Agent 主动执行工具并引导用户完成。
 
-## 1. 模块留档与按功能分目录规范
+## 核心铁律
 
-- **必须完整留档**：严禁只修改安装目录（`resources/app.asar` 或 `resources/bin/language_server.exe`），也不允许把补丁逻辑散落成根目录单文件或临时脚本。所有改造必须沉淀为完整、独立、可反复构建与卸载的工程模块。
-- **按功能独立存放**：每个独立功能独占一个根目录子文件夹，统一使用全小写连字符命名 `agy-<feature>/`（如 `agy-periodic-model/`），职责单一、互不耦合。
-- **现有模块清单**：
-  - `agy-zh-cn/`：全量简体中文界面汉化与词典工具链
-  - `agy-weekly-quota/`：左下角多账号周额度插槽
-  - `agy-file-menu/`：本地文件增强右键菜单
-  - `agy-token-meter/`：输入框下方实时 `tok/s` 输出速度与 Tokens 用量
-  - `agy-periodic-model/`：Gemini 4 元素周期表模型选择器（含二级菜单与周额度显示）
-  - `agy-win-notify/`：Windows 系统通知点击跳转修复（绑定 AUMID、保活 Notification、修复 BaseWindow 派发与强制窗口前置）
-  - `agy-zh-title/`：中文对话标题生成（`language_server.exe` 提示词原位替换）
-  - `agy-zh-steps/`：中文步骤与状态摘要生成（`language_server.exe` 9 处步骤清单、焦点状态及 UI 标签约束原位替换）
-  - 共享基础设施：`.backup/`（纯净原包与元信息池）、`repatch-all.mjs`（联合编排器）、`repatch.cmd`（一键入口）、`README.md`
-- **标准模块目录骨架**：新增或重构功能模块时，须按如下结构落盘：
+1. **禁止把命令行甩给用户自己跑**：不得回复“请运行某某命令”，必须由 Agent 直接执行并把可读结果呈现给用户。
+2. **绝不强杀正在运行的客户端进程**：严禁 kill `Antigravity.exe` 主进程。仅当本次修改涉及 `app.asar` 或 `language_server.exe` 且客户端正在运行时，才让 `repatch-all.mjs` 通过 WMI（`Win32_Process.Create`）脱离进程树在后台待命，然后明确提示用户手动关闭全部 Antigravity 窗口，等待 3～5 秒自动完成替换并重开。
+3. **不越权修改源码**：日常生效、启用、卸载流程禁止擅自修改 `agy-*` 源码文件；仅在用户明确要求新增功能、修改源码或修复上游更新导致的特征失效时，再读取 [DEV_GUIDE.md](./DEV_GUIDE.md) 切入开发模式。
 
-```text
-agy-<feature>/
-├── package.json                  # 声明 "type": "module" 及 test / check / patch / restore 脚本
-├── README.md                     # 功能说明、注入标记、交互逻辑与常用命令
-├── src/                          # 运行时源码（如 <feature>-preload.js / <feature>-main-ipc.js）
-├── patcher/
-│   ├── check.mjs                 # 状态自检（支持 --json）
-│   ├── patch.mjs                 # 独立幂等注入与 --dry-run 包头/内容校验
-│   ├── restore.mjs               # 独立剥离（保留共存补丁；无其他补丁时还原纯净备份）
-│   └── lib/
-│       ├── app.mjs               # 定位安装目录与读取版本（TEMP_ROOT 优先 D:\Data\.temp）
-│       ├── common.mjs            # 标记常量、共享 .backup/、进程过滤与文件校验工具
-│       └── deps.mjs              # 自动解析同级 patcher 的 @electron/asar / jsdom 依赖
-└── test/                         # node --test 自动化单测（含 JSDOM 行为测试与共存幂等测试）
-```
+---
 
-- **联合编排同步**：新增模块完成后，必须同步接入：
-  1. `repatch-all.mjs`：加入语法/业务预检项、`inspectState()` 状态项、合并注入与计数校验；
-  2. `repatch.cmd`：同步更新标题或模块清单提示；
-  3. 根目录 `README.md`：更新补丁总数、模块说明表及命令说明。
+## 触发判定（本工作区优先）
 
-## 2. 多补丁共存与注入技术红线
+只要当前对话处于本工作目录（`Antigravity` / `Antigravity-Mods`），用户提到的**「插件」「补丁」「mod」「魔改」「爆改」「汉化」默认全部指代本项目内置的 9 项补丁**，优先走本流程，绝不去搜外部 Marketplace 插件商店或反问“要装什么插件”：
 
-- **唯一标记块与幂等剥离**：
-  - 所有代码注入必须使用满足 `ANY_PATCH_RE = /\/\*AGY-[A-Z0-9_-]+-BEGIN\*\//` 的独立注释块：`/*AGY-<NAME>-BEGIN*/ ... /*AGY-<NAME>-END*/`（主进程 `dist/main.js` 附加 `-MAIN-` 后缀）。
-  - 每个模块的 `strip*` 与 `build*` 必须严格幂等：剥离自身时不得破坏同文件中的其他补丁块，重打包时必须校验每类标记块恰好出现 1 次。
-- **纯净备份池不可污染**：`.backup/app.asar.<version>` 及原生二进制备份/元信息文件只能源自未含任何 `ANY_PATCH_RE` 标记的官方原版包；严禁把已打补丁的包写入 `.backup/`。
-- **Electron 沙箱与重打包约束**：
-  - `dist/preload.js` 运行在沙箱环境（`contextIsolation: true`、`nodeIntegration: false`），无法直接 `require('fs')` 动态读取本地外部脚本；所有运行时逻辑与资源必须在打包期完整内联，并转义 `\u2028` / `\u2029`，落盘前后通过 `node --check`。
-  - 重打包 `app.asar` 必须保留原包头的 `unpacked`（含点开头隐藏路径）与 POSIX `executable` 位，并通过包头与再解包全量哈希校验。
-- **Main World 注入规范**：
-  - 注入到 Main World 的函数（经 `webFrame.executeJavaScript`）必须完全自包含，不得引用外层闭包变量；须同时在立即执行与 `DOMContentLoaded` / `load` 时兜底绑定，不得假定 `preload.js` 执行瞬间 `document.documentElement` 已存在。
-  - 所有 UI/脚本注入须跳过非主Hub页面，屏蔽 `top !== self` 的 iframe，并跳过 `--agy-backend=ssh` 远程窗口。
-- **补丁间协同与 DOM 安全边界**：
-  - **防汉化误改**：所有新增原生 DOM/弹窗容器须打上 `data-agy-zh-skip="1"`，避免 `agy-zh-cn` 误译或打断自定义文本节点。
-  - **链式旁路 LS 客户端**：监听 Language Server 响应必须通过 `Object.defineProperty` 链式包裹 `globalThis.__JETSKI_LS_CLIENT_DECORATOR__`（保留先前装饰器），严禁覆盖全局钩子、严禁主动发起额外网络请求、严禁读取本地 OAuth 凭证。
-  - **防闪烁与防抢焦点**：高频扫描/定时同步必须先比对数据指纹再按需更新 DOM，严禁无变化时销毁重建元素导致 hover 闪烁或滚动重置。
-- **二进制原位补丁红线（如 `language_server.exe`）**：
-  - 仅允许唯一匹配且严格等长 UTF-8 原位字节替换，必须显式校验命中区不与尾部内嵌前端 ZIP 重叠，并支持位级可逆还原；上游文本变化时报错停手并输出特征上下文。
+- **安装 / 启用类**：`安装插件`、`装插件`、`安装补丁`、`打补丁`、`安装`、`装一下`、`开始`、`初始化`、`生效`、`全量生效`、`启用 xxx`
+- **远端安装 / 更新类**：`从 GitHub 安装`、`远端安装`、`更新补丁`、`检查更新`、`同步远端`、`拉取最新`
+- **升级 / 体检类**：`更新了`、`客户端升级了`、`恢复`、`重打`、`检查`、`体检`、`看看状态`
+- **卸载 / 回滚类**：`卸载`、`卸载插件`、`关闭 xxx`、`去掉 xxx`、`还原`、`恢复原版`
 
-## 3. 安全打补丁与验收门禁
+命中上述任意说法，**立刻从 Step 1 静默自检并出表开始**。仅当用户明确点名外部第三方插件/产品名（如 Figma、Notion 等）或明确要求新增/修改源码时，才不触发本生效流程。
 
-- **禁止强杀宿主进程**：严禁在脚本或终端内强杀正在运行的 `Antigravity.exe` 主进程。安装/替换必须通过 `node repatch-all.mjs`（利用 WMI `Win32_Process.Create` 脱离宿主进程树），等待用户手动关窗后自动完成替换与重开（`runningCount` 须排除不锁 `app.asar` 的 `sidecar_sdk/register_loader.js` 进程）。
-- **交付前双门禁**：每次修改任意补丁模块后，交付或提交前必须确认全部通过：
-  1. 所属模块测试：`Set-Location <module>; npm.cmd test` 全部通过；
-  2. 联合重打包预检：在根目录执行 `node repatch-all.mjs --dry-only` 全部预检通过，且不污染本地安装目录。
+---
 
-## 4. Git 仓库与隐私卫生
+## 内置 9 项补丁清单
 
-- **严禁入库文件**：`.backup/`、各处 `node_modules/`、`agy-zh-cn/work/`、`agy-weekly-quota/accounts.json`（含个人账号与额度快照）、`*.log` 与 `*.tmp` 一律通过根目录 `.gitignore` 排除，严禁提交到远端。
-- **提交前自检**：执行 `git add` / `git commit` 前检查 `git status --short` 与变更体积，确认无临时构建产物、无个人邮箱/密钥等敏感信息泄漏。
+| 短 ID | 补丁名称 | 能力说明 | 生效目标 | 是否需关窗重开 |
+| :--- | :--- | :--- | :--- | :--- |
+| `zh-cn` | 全量简体中文界面 | Antigravity 界面全量汉化与动态文本翻译 | `app.asar` | 是 |
+| `weekly-quota` | 左下角周额度插槽 | 在设置按钮上方展示当前及已记录账号周额度（0 主动请求） | `app.asar` | 是 |
+| `file-menu` | 本地文件增强右键菜单 | 支持复制、复制路径、资源管理器定位与默认浏览器/程序打开 | `app.asar` | 是 |
+| `token-meter` | 实时 Tokens 与速度统计 | 输入框下方实时展示 `tok/s` 输出速度、上下文占比与日/周消耗 | `app.asar` | 是 |
+| `periodic-model` | 周期表模型选择器 | Gemini 4 元素周期表交互、分桶周额度饼图与同档位等效月 API 费用 | `app.asar` | 是 |
+| `win-notify` | Windows 通知点击跳转 | 绑定匹配 `AppUserModelId`、修复多窗口点击跳转与焦点前置 | `app.asar` | 是 |
+| `zh-title` | 中文对话标题 | 原位替换对话标题生成提示词，新对话源头输出简体中文标题 | `language_server.exe` | 是 |
+| `zh-steps` | 中文步骤与状态卡片 | 原位替换 9 处步骤清单、焦点状态及工具标签约束为简体中文 | `language_server.exe` | 是 |
+| `compact-retitle` | 压缩后自动重命名 | 自动或 `/compact` 压缩后唤醒并更新中文对话标题（原生插件钩子） | `~/.gemini/config/plugins/` | **否（即时生效）** |
+
+---
+
+## 5 步标准引导流程
+
+当用户打开本工作区并提出任何安装、启用、检查、远端更新或卸载诉求时，严格按以下步骤推进：
+
+### Step 0：远端首次接入与目录就位（非本仓库常规目录或落入临时目录时执行）
+如果用户是在任意其他会话里丢入本仓库的 GitHub 地址（例如 `https://github.com/lyufeng000/Antigravity-Mods.git`）要求远端安装，**或者 Agent 刚才不慎将本仓库先克隆到了系统临时目录**（如 `%TEMP%`、`AppData\Local\Temp`、`/tmp`）：
+1. **严禁在系统临时目录内直接执行打补丁或备份操作**（系统随时可能清理临时目录，导致 `.backup/` 纯净备份丢失）。
+2. 统一以固定持久化目录 `%USERPROFILE%\.antigravity-mods` 为准：
+   - 若不存在：直接执行 `git clone https://github.com/lyufeng000/Antigravity-Mods.git "%USERPROFILE%\.antigravity-mods"`；
+   - 若已存在且为 Git 仓库：直接复用该目录（严禁删除重下，以免丢失 `.backup/` 纯净备份池）。
+3. 切换到 `%USERPROFILE%\.antigravity-mods` 再进入 Step 1（后续所有命令均在该目录下执行）。
+
+### Step 1：静默自检、远端探新与依赖补全
+1. 检查仓库根目录 `node_modules` 是否存在；若缺失（首次克隆或换机），直接运行 `npm.cmd install --no-package-lock` 自动装好共享依赖。
+2. 若用户本轮明确要求「更新补丁 / 检查更新 / 同步远端 / 拉取最新」或为首次远端接入复用已有目录：先运行 `node repatch-all.mjs update --json`（若工作区存在未提交修改，status 为 `dirty_behind` 时绝不强行覆盖，直接提示用户确认；若为 `updated`，把拉取到的新提交摘要呈现给用户）。其他场景则静默运行 `node repatch-all.mjs update --check --json` 探测远端更新（断网超时或非 Git 目录时静默跳过，绝不阻塞主流程）。
+3. 运行 `node repatch-all.mjs check --json` 获取客户端状态；若未检测到 Antigravity 安装目录或 `node` 环境，直接告知缺失条件并停止。
+
+### Step 2：体检出表
+把 `check --json`（以及远端探新结果）整理为简洁直观的中文汇总反馈给用户：
+- 若静默探测到 `status === 'behind'`：在汇总顶部醒目提示「GitHub 远端有 N 个新提交待拉取」，并列出新增提交简要记录。
+- 当前 **Antigravity 客户端版本** 与 **汉化词典基准版本**（若二者不一致，提示客户端已升级）。
+- **共享纯净备份状态**（`.backup/` 是否有匹配当前版本的干净原包）。
+- **9 项补丁当前状态表**（补丁名称、短 ID、一句话作用、当前状态：`已生效` / `未安装` / `待升级` / `需转为真实目录` / `上游特征变更`）。
+
+### Step 3：意图分流与按需勾选
+若用户在首句已明确意图（例如“全量重打”“只要汉化和通知修复”“还原原版”），直接确认集合进入 Step 4；若未明确，**优先使用交互式选择题卡片引导**（先单选操作模式；若用户选「按需挑选」或「仅卸载指定项」，再弹出 9 项多选勾选；若远端有新提交且本地干净，可提供「先拉取远端最新再按需生效」选项）：
+1. **一键全量生效 / 更新后全量恢复**：启用全部 9 项补丁（若选先更新远端，先执行 `node repatch-all.mjs update --json`）。
+2. **按需挑选部分补丁**：勾选任意子集（声明式同步语义：本次未勾选的旧补丁会被自动剥离清理）。
+3. **仅卸载指定项 / 一键还原官方原版**：精准移除指定几项（`restore --only ...`），或完整还原 `app.asar`、`language_server.exe` 与原生插件目录。
+4. **增量补译新增英文词条**：仅当客户端版本高于词典基准版本且用户反馈出现新英文时，引导读取 `agy-zh-cn` 技能完成增量 diff 补译后再执行合并重打。
+
+### Step 4：强制预检门禁（Dry-Run）与异常处理
+正式写入安装目录前，**必须先按目标操作执行预检**（绝不跳过）：
+- 全量生效：`node repatch-all.mjs --dry-only`
+- 按需生效：`node repatch-all.mjs patch --only <id1,id2,...> --dry-only`（或 `--exclude <id1,id2,...>`）
+- 卸载指定项：`node repatch-all.mjs restore --only <id1,id2,...> --dry-only`
+
+**大版本升级特征漂移分流**：
+若预检阶段因客户端升级导致某项二进制补丁（`zh-title` 或 `zh-steps`）提示词匹配失败（`prompt_changed` / `not_found`），立刻停手并给用户两个明确分支：
+- **分支 A（推荐先恢复工作流）**：用 `--exclude <故障项ID>` 先跳过失效项，立即把其余全部补丁生效；
+- **分支 B（源码适配）**：读取 [DEV_GUIDE.md](./DEV_GUIDE.md)，排查新版二进制中的目标文本并更新特征后再打。
+
+### Step 5：安全执行、关窗提示与验收回滚
+预检全部通过后，执行正式命令（去掉 `--dry-only`）：
+1. **仅涉及 `compact-retitle`**（未改 `app.asar` 与 `language_server.exe`）：
+   - 命令同步完成，直接告知已即时生效，**无需关闭或重启 Antigravity**。
+2. **涉及 `app.asar` 或 `language_server.exe`**：
+   - 若客户端当前未运行：命令同步完成替换并自动拉起客户端；
+   - 若客户端当前正在运行：命令已启动脱离宿主进程树的后台等待任务，必须**明确提醒用户现在手动关闭全部 Antigravity 窗口**，后台会在关闭后约 **3～5 秒**自动完成替换并重新打开客户端，同时告知日志路径（默认 `%TEMP%` 或 `D:\Data\.temp\agy-repatch\repatch.log`）。
+3. **验收与回滚兜底**：
+   - 告知用户重开后可直观检查的验收点（中文界面、左下角周额度、周期表模型按钮、通知点击唤醒、新建对话中文标题与步骤卡片等）；
+   - 若使用中发现任何异常，告知用户只要对 Agent 说“还原官方原版”即可一键无损恢复。
+
+---
+
+## 研发模式入口（按需加载）
+
+日常使用、安装、体检、勾选与回滚**不需要**读取开发文档。仅当用户明确要求**新增补丁模块、修改已有补丁源码、更新汉化词典工具链或修复二进制特征**时，再读取 [DEV_GUIDE.md](./DEV_GUIDE.md)。

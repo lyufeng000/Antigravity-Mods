@@ -10,13 +10,12 @@ const PROJECT_ROOT = path.resolve(here, '..', '..');
 
 function candidatePackageJsons() {
   return [
+    path.resolve(PROJECT_ROOT, '..', 'package.json'),
     path.join(PROJECT_ROOT, 'package.json'),
     path.join(PROJECT_ROOT, 'patcher', 'package.json'),
     path.resolve(PROJECT_ROOT, '..', 'agy-zh-cn', 'patcher', 'package.json'),
     path.resolve(PROJECT_ROOT, '..', 'agy-weekly-quota', 'patcher', 'package.json'),
     path.resolve(PROJECT_ROOT, '..', 'agy-weekly-quota', 'package.json'),
-    'F:\\Code\\Antigravity\\agy-zh-cn\\patcher\\package.json',
-    'F:\\Code\\Antigravity\\agy-weekly-quota\\patcher\\package.json',
     path.join(os.homedir(), '.gemini', 'config', 'plugins', 'agy-zh-cn', 'patcher', 'package.json'),
   ];
 }

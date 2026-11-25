@@ -1,13 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_ROOT = path.resolve(HERE, '..');
-const DEFAULT_DEST = path.join(os.homedir(), '.gemini', 'config', 'plugins', 'agy-compact-retitle');
+export const DEFAULT_DEST = path.join(os.homedir(), '.gemini', 'config', 'plugins', 'agy-compact-retitle');
 
-const RUNTIME_FILES = [
+export const RUNTIME_FILES = [
   'plugin.json',
   'hooks.json',
   'package.json',
@@ -15,6 +16,10 @@ const RUNTIME_FILES = [
   'scripts/compact-retitle.mjs',
   'scripts/set-title.mjs',
 ];
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
 
 function removeExistingTarget(destDir) {
   let stat;
@@ -46,6 +51,84 @@ function removeExistingTarget(destDir) {
   }
 
   fs.unlinkSync(destDir);
+}
+
+/**
+ * 检测全局插件目录当前安装状态（区分未安装 / Windows 目录联接 / 已过期待同步 / 已安装）。
+ */
+export function inspectPlugin(destDir = DEFAULT_DEST) {
+  let stat;
+  try {
+    stat = fs.lstatSync(destDir);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return {
+        status: 'not_installed',
+        installed: false,
+        dest: destDir,
+        missingFiles: [...RUNTIME_FILES],
+        outdatedFiles: [],
+      };
+    }
+    throw err;
+  }
+
+  if (stat.isSymbolicLink()) {
+    return {
+      status: 'junction',
+      installed: false,
+      dest: destDir,
+      missingFiles: [],
+      outdatedFiles: [],
+    };
+  }
+
+  if (!stat.isDirectory()) {
+    return {
+      status: 'outdated',
+      installed: false,
+      dest: destDir,
+      missingFiles: [...RUNTIME_FILES],
+      outdatedFiles: [],
+    };
+  }
+
+  const missingFiles = [];
+  const outdatedFiles = [];
+  for (const rel of RUNTIME_FILES) {
+    const src = path.join(SRC_ROOT, rel);
+    const dst = path.join(destDir, rel);
+    if (!fs.existsSync(dst)) {
+      missingFiles.push(rel);
+      continue;
+    }
+    if (sha256File(src) !== sha256File(dst)) {
+      outdatedFiles.push(rel);
+    }
+  }
+
+  const upToDate = missingFiles.length === 0 && outdatedFiles.length === 0;
+  return {
+    status: upToDate ? 'installed' : 'outdated',
+    installed: upToDate,
+    dest: destDir,
+    missingFiles,
+    outdatedFiles,
+  };
+}
+
+/**
+ * 安全卸载全局插件目录（对目录联接仅解除链接，不误删源码目录）。
+ */
+export function uninstallPlugin(destDir = DEFAULT_DEST) {
+  try {
+    fs.lstatSync(destDir);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { removed: false, dest: destDir };
+    throw err;
+  }
+  removeExistingTarget(destDir);
+  return { removed: true, dest: destDir };
 }
 
 /**

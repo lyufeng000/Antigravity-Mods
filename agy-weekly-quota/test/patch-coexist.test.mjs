@@ -35,6 +35,7 @@ const env = {
   AGY_ZH_TEMP: path.join(ROOT, 'work-zh'),
   AGY_QUOTA_TEMP: path.join(ROOT, 'work-quota'),
   AGY_REPATCH_TEMP: path.join(ROOT, 'work-repatch'),
+  AGY_COMPACT_RETITLE_DEST: path.join(ROOT, 'plugins', 'agy-compact-retitle'),
 };
 
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
@@ -157,7 +158,7 @@ test('repatch-all.mjs 统一编排器：单次解包同时注入双补丁、状�
   assert.equal(JSON.parse(pkgUpdate.stdout).anyPatched, false);
 
   // 一键合并注入双补丁（不校验生产大词典 lint 以加速单测，仍完整注入真实词典与插槽）
-  const p = runNode(REPATCH_ALL, 'patch', '--no-relaunch', '--no-lint');
+  const p = runNode(REPATCH_ALL, 'patch', '--exclude', 'zh-title,zh-steps,compact-retitle', '--no-relaunch', '--no-lint');
   assert.equal(p.status, 0, p.stdout + p.stderr);
 
   const chk = runNode(REPATCH_ALL, 'check', '--json');

@@ -21,8 +21,8 @@ function candidatePackageJsons() {
   const p = argPluginDir();
   if (p) out.push(path.resolve(p, 'patcher', 'package.json'));
   out.push(path.join(SCRIPT_DIR, 'package.json'));
+  out.push(path.resolve(SCRIPT_DIR, '..', '..', 'package.json'));
   out.push(path.resolve(process.cwd(), 'package.json'));
-  out.push('F:\\Code\\Antigravity\\agy-zh-cn\\patcher\\package.json');
   out.push(path.join(os.homedir(), '.gemini', 'config', 'plugins', 'agy-zh-cn', 'patcher', 'package.json'));
   return [...new Set(out)];
 }

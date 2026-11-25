@@ -49,6 +49,7 @@ const env = {
   AGY_QUOTA_TEMP: path.join(ROOT, 'work-quota'),
   AGY_FILE_MENU_TEMP: path.join(ROOT, 'work-file-menu'),
   AGY_REPATCH_TEMP: path.join(ROOT, 'work-repatch'),
+  AGY_COMPACT_RETITLE_DEST: path.join(ROOT, 'plugins', 'agy-compact-retitle'),
 };
 
 const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
@@ -231,14 +232,14 @@ test('repatch-all.mjs 三补丁联合编排器：dry-only 预检、合并注入�
   assert.equal(st0.anyPatched, false);
 
   // 1. --dry-only 预检不修改安装目录
-  const dry = runNode(REPATCH_ALL, 'patch', '--dry-only', '--no-lint');
+  const dry = runNode(REPATCH_ALL, 'patch', '--exclude', 'zh-title,zh-steps,compact-retitle', '--dry-only', '--no-lint');
   assert.equal(dry.status, 0, dry.stdout + dry.stderr);
   assert.equal(sha(ASAR), origHash, '--dry-only 不得修改安装目录');
 
   // 2. 首次合并注入三补丁 + 再次合并重打三补丁（幂等性验证）
-  const p1 = runNode(REPATCH_ALL, 'patch', '--no-relaunch', '--no-lint');
+  const p1 = runNode(REPATCH_ALL, 'patch', '--exclude', 'zh-title,zh-steps,compact-retitle', '--no-relaunch', '--no-lint');
   assert.equal(p1.status, 0, p1.stdout + p1.stderr);
-  const p2 = runNode(REPATCH_ALL, 'patch', '--no-relaunch', '--no-lint');
+  const p2 = runNode(REPATCH_ALL, 'patch', '--exclude', 'zh-title,zh-steps,compact-retitle', '--no-relaunch', '--no-lint');
   assert.equal(p2.status, 0, p2.stdout + p2.stderr);
 
   const preload = preloadOf(ASAR);
