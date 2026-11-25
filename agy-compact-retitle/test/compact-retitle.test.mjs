@@ -50,6 +50,10 @@ test('无 CHECKPOINT 时 pre-invocation 与 stop 均返回空对象', () => {
     handleHookEvent({ ...basePayload, hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL' }, { stateDir, mode: 'stop' }),
     {},
   );
+  assert.deepEqual(
+    handleHookEvent({ ...basePayload, hookEventName: 'Stop', terminationReason: 'TERMINAL_CUSTOM_HOOK' }, { stateDir, mode: 'stop' }),
+    {},
+  );
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -182,6 +186,19 @@ test('stop 在 NO_TOOL_CALL 与 TERMINAL_STEP_TYPE 下触发 continue，但在�
   );
   assert.equal(triggeredNoTool.decision, 'continue');
   assert.match(triggeredNoTool.reason, /CHECKPOINT #31/);
+
+  // 手动 /compact 在 TERMINAL_CUSTOM_HOOK 下也能正常触发
+  const triggeredCustomHook = handleHookEvent(
+    {
+      conversationId: 'conv-stop-3',
+      transcriptPath,
+      hookEventName: 'Stop',
+      terminationReason: 'TERMINAL_CUSTOM_HOOK',
+    },
+    { stateDir, mode: 'stop', nowMs },
+  );
+  assert.equal(triggeredCustomHook.decision, 'continue');
+  assert.match(triggeredCustomHook.reason, /CHECKPOINT #31/);
 
   fs.rmSync(dir, { recursive: true, force: true });
 });

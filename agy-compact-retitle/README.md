@@ -9,29 +9,29 @@ Antigravity 压缩后自动重命名对话标题插件：在**自动压缩**或*
 1. **自动压缩（模型上下文超限触发）**
    - 自动压缩多发生在单轮执行中间；下一次调用模型前的 `PreInvocation` 钩子从 `transcript.jsonl` 末尾检测到新的 `CHECKPOINT`（`status: "DONE"`），立即注入一条 `systemMessage`，引导模型在本轮顺手执行 `scripts/set-title.mjs` 更新标题，不打断原任务。
 2. **手动压缩（用户输入 `/compact`）**
-   - `/compact` 执行完成后会结束当前执行循环并触发 `Stop` 钩子；`Stop` 检测到新的 `CHECKPOINT` 后返回 `{ "decision": "continue", "reason": "..." }`，唤醒 Agent 立即根据刚生成的摘要调用 `scripts/set-title.mjs` 更新标题。
+   - 纯 `/compact` 由内置压缩钩子生成 `CHECKPOINT` 后会以 `TERMINAL_CUSTOM_HOOK` 终止原因结束当前执行循环并转入 `Stop` 钩子；`Stop` 检测到刚生成的未处理 `CHECKPOINT` 后返回 `{ "decision": "continue", "reason": "..." }`，唤醒 Agent 立即根据压缩摘要调用 `scripts/set-title.mjs` 更新标题。
 
 ## 防误触与防循环机制
 
 - **单会话状态去重**：按 `conversationId` 持久化记录 `lastHandledStep` 与文件大小/修改时间，同一 `CHECKPOINT` 只触发一次；文件未变化时零扫描直接返回 `{}`。
-- **`Stop` 护栏**：遇到 `continuationActive: true`、`USER_CANCELED`、`ERROR`、`MAX_INVOCATIONS` 等中止状态直接跳过，杜绝死循环。
+- **`Stop` 护栏**：仅在 `NO_TOOL_CALL`、`TERMINAL_STEP_TYPE`、`TERMINAL_CUSTOM_HOOK`（或空值）下继续结合未处理 `CHECKPOINT` 校验决定是否唤醒（其他自定义钩子若未产生新 `CHECKPOINT` 也会安全跳过）；遇到 `continuationActive: true`、`USER_CANCELED`、`ERROR`、`MAX_INVOCATIONS` 等中止状态直接跳过，杜绝死循环。
 - **旧对话冷启动保护**：首次接入本插件打开历史对话时，若已有的最新 `CHECKPOINT` 超过 10 分钟，则静默记录基线不弹窗改名；后续再触发新压缩仍会正常生效。
 - **子代理跳过**：`scripts/set-title.mjs` 会先调用 `GetConversation`，若检测到 `metadata.parentConversationId` 非空（子代理会话），自动跳过不改标题。
 - **Fail-open 容错**：钩子脚本任意异常或解析失败均安全输出 `{}` 并以退出码 `0` 结束，绝不阻塞正常对话；不修改 `app.asar` 与 `language_server.exe`，客户端升级不失效。
 
 ## 部署位置与测试
 
-- 全局真实目录：`C:\Users\lyufeng\.gemini\config\plugins\agy-compact-retitle`（Windows 下 Antigravity 插件扫描器会跳过目录联接 Junction，须以真实目录部署）
-- 同步安装命令：
+- 全局真实目录：`%USERPROFILE%\.gemini\config\plugins\agy-compact-retitle`（Windows 下 Antigravity 插件扫描器会跳过目录联接 Junction，须以真实目录部署）
+- 同步安装命令（在仓库根目录执行）：
 
 ```powershell
-Set-Location "F:\Code\Antigravity\agy-compact-retitle"
+Set-Location ".\agy-compact-retitle"
 npm.cmd run install-plugin
 ```
 
-- 运行单元测试：
+- 运行单元测试（在仓库根目录执行）：
 
 ```powershell
-Set-Location "F:\Code\Antigravity\agy-compact-retitle"
+Set-Location ".\agy-compact-retitle"
 npm.cmd test
 ```

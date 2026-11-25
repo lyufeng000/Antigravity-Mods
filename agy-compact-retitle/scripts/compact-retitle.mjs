@@ -4,7 +4,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const DEFAULT_MAX_INITIAL_AGE_MS = 10 * 60 * 1000;
-const ALLOWED_STOP_REASONS = new Set(['', undefined, 'NO_TOOL_CALL', 'TERMINAL_STEP_TYPE']);
+const ALLOWED_STOP_REASONS = new Set([
+  '',
+  undefined,
+  'NO_TOOL_CALL',
+  'TERMINAL_STEP_TYPE',
+  'TERMINAL_CUSTOM_HOOK',
+]);
 
 /**
  * 解析状态文件存储目录，优先使用 PLUGIN_DATA，其次 D:\Data\.temp，最后系统临时目录。
